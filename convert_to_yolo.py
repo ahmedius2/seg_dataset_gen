@@ -1,18 +1,19 @@
 """
 convert_to_yolo.py
 ──────────────────
-Converts the binary PNG masks produced by generate_dataset.py into
-YOLOv8-seg label format, then builds the standard train/val split.
+Converts the class and instance PNG maps produced by generate_dataset.py
+into Ultralytics YOLO-seg label format, then builds the standard split.
 
-YOLOv8-seg label format (one .txt per image):
+Ultralytics YOLO-seg label format (one .txt per image):
     <class_id>  x1 y1  x2 y2  ...  xn yn
-  • class_id : integer  (0 = traversable, 1 = obstacle)
+    • class_id : integer  (0 = traversable, 1 = obstacle, 2 = target)
   • coordinates are NORMALISED to [0, 1] (divided by image W / H)
-  • each line describes ONE polygon contour of ONE instance
+    • each line describes ONE polygon contour of ONE visible instance
 
 What this script does:
-  1. Reads every mask in OUTPUT_DIR/masks/
-  2. Uses OpenCV to find contours of the OBSTACLE region (white pixels)
+  1. Reads class maps from OUTPUT_DIR/masks/ and instance maps from
+      OUTPUT_DIR/instances/
+  2. Finds contours independently for every visible instance ID
   3. Simplifies each contour with the Douglas–Peucker algorithm
   4. Writes one YOLO label .txt per image
   5. Splits images + labels 80 / 20 into train / val sets
@@ -46,18 +47,7 @@ YOLO_DIR = "/home/dho/work/ileri_otonom/seg_dataset_gen/yolo_dataset"
 
 # Class definitions — must be consistent with what you use in training
 # Index in this list == class id in the label files
-CLASSES = ["traversable", "obstacle"]
-
-# Which mask pixel value corresponds to which class
-# (255 = obstacle in the masks produced by generate_dataset.py)
-OBSTACLE_PIXEL_VALUE  = 255   # → class id 1
-# (0   = traversable)
-TRAVERSABLE_PIXEL_VALUE = 0   # → class id 0
-
-# Include traversable (ground) contours in the labels?
-# Usually NO for binary seg — only obstacle outlines matter for YOLOv8-seg.
-# Set True if you want the ground region annotated as well.
-INCLUDE_TRAVERSABLE_LABEL = False
+CLASSES = ["traversable", "obstacle", "target"]
 
 # Train / validation split ratio
 TRAIN_RATIO = 0.80
@@ -89,7 +79,7 @@ def find_and_simplify_contours(mask_gray: np.ndarray,
         [x1/w, y1/h, x2/w, y2/h, ...]   (all in [0, 1])
     """
     # Threshold to binary
-    binary = np.zeros_like(mask_gray, dtype=np.uint8)
+    binary = np.zeros(mask_gray.shape, dtype=np.uint8)
     binary[mask_gray == target_value] = 255
 
     # Optional: small morphological closing to fill pixel-level gaps
@@ -128,37 +118,41 @@ def find_and_simplify_contours(mask_gray: np.ndarray,
     return polys
 
 
-def mask_to_yolo_lines(mask_path: str,
-                       include_traversable: bool,
+def instance_maps_to_yolo_lines(class_path: str,
+                       instance_path: str,
                        epsilon_frac: float,
                        min_area: int) -> list:
     """
-    Read a binary mask PNG and return a list of YOLO-seg label lines
-    (strings, ready to be written to a .txt file).
+    Convert per-pixel class and instance maps into one YOLO polygon per
+    visible instance contour. Instance IDs are zero for background.
     """
-    mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
-    if mask is None:
-        raise FileNotFoundError(f"Could not read mask: {mask_path}")
+    class_map = cv2.imread(class_path, cv2.IMREAD_GRAYSCALE)
+    instance_map = cv2.imread(instance_path, cv2.IMREAD_UNCHANGED)
+    if class_map is None:
+        raise FileNotFoundError(f"Could not read class map: {class_path}")
+    if instance_map is None:
+        raise FileNotFoundError(f"Could not read instance map: {instance_path}")
+    if class_map.shape != instance_map.shape:
+        raise ValueError(f"Map shape mismatch for {Path(class_path).stem}")
 
-    h, w = mask.shape
+    h, w = class_map.shape
     lines = []
 
-    # ── Obstacle contours (class 1) ─────────────────────────────────
-    obs_polys = find_and_simplify_contours(
-        mask, OBSTACLE_PIXEL_VALUE, w, h, epsilon_frac, min_area
-    )
-    for poly in obs_polys:
-        pts_str = " ".join(map(str, poly))
-        lines.append(f"1 {pts_str}")
-
-    # ── Traversable contours (class 0) — optional ───────────────────
-    if include_traversable:
-        trav_polys = find_and_simplify_contours(
-            mask, TRAVERSABLE_PIXEL_VALUE, w, h, epsilon_frac, min_area
+    for instance_id in np.unique(instance_map):
+        if instance_id == 0:
+            continue
+        instance_pixels = instance_map == instance_id
+        class_values = class_map[instance_pixels]
+        if class_values.size == 0:
+            continue
+        class_id = int(np.bincount(class_values).argmax())
+        if class_id >= len(CLASSES):
+            continue
+        polygons = find_and_simplify_contours(
+            instance_map, int(instance_id), w, h, epsilon_frac, min_area
         )
-        for poly in trav_polys:
-            pts_str = " ".join(map(str, poly))
-            lines.append(f"0 {pts_str}")
+        for poly in polygons:
+            lines.append(f"{class_id} {' '.join(map(str, poly))}")
 
     return lines
 
@@ -167,18 +161,20 @@ def build_yolo_dataset(output_dir: str,
                        yolo_dir: str,
                        classes: list,
                        train_ratio: float,
-                       include_traversable: bool,
                        epsilon_frac: float,
                        min_area: int,
                        seed: int) -> None:
 
     img_src  = os.path.join(output_dir, "images")
     mask_src = os.path.join(output_dir, "masks")
+    instance_src = os.path.join(output_dir, "instances")
 
     if not os.path.isdir(img_src):
         raise FileNotFoundError(f"images/ directory not found: {img_src}")
     if not os.path.isdir(mask_src):
         raise FileNotFoundError(f"masks/ directory not found: {mask_src}")
+    if not os.path.isdir(instance_src):
+        raise FileNotFoundError(f"instances/ directory not found: {instance_src}")
 
     # Collect all sample stems (e.g. "0000", "0001", …)
     stems = sorted(
@@ -213,14 +209,15 @@ def build_yolo_dataset(output_dir: str,
         for stem in stem_list:
             src_img  = os.path.join(img_src,  f"{stem}.png")
             src_mask = os.path.join(mask_src, f"{stem}.png")
+            src_instance = os.path.join(instance_src, f"{stem}.png")
 
             # Copy image
             dst_img = os.path.join(yolo_dir, "images", split, f"{stem}.png")
             shutil.copy2(src_img, dst_img)
 
             # Generate YOLO label
-            lines = mask_to_yolo_lines(
-                src_mask, include_traversable, epsilon_frac, min_area
+            lines = instance_maps_to_yolo_lines(
+                src_mask, src_instance, epsilon_frac, min_area
             )
 
             dst_lbl = os.path.join(yolo_dir, "labels", split, f"{stem}.txt")
@@ -253,9 +250,9 @@ def build_yolo_dataset(output_dir: str,
     print(f"\n[DONE] YOLO dataset written to: {yolo_dir}")
     print(f"       dataset.yaml: {yaml_path}")
     print(
-        "\nTo train YOLOv8-seg:\n"
+        "\nTo train Ultralytics YOLO11-seg:\n"
         f"    yolo segment train data={yaml_path} "
-        "model=yolov8n-seg.pt epochs=100 imgsz=640"
+        "model=yolo11n-seg.pt epochs=100 imgsz=640"
     )
 
 
@@ -267,7 +264,7 @@ def verify_label(label_path: str, image_path: str) -> None:
     """
     img  = cv2.imread(image_path)
     h, w = img.shape[:2]
-    colours = {0: (0, 200, 0), 1: (0, 0, 255)}   # green / red
+    colours = {0: (0, 200, 0), 1: (0, 0, 255), 2: (255, 0, 0)}
 
     with open(label_path) as f:
         for line in f:
@@ -294,7 +291,7 @@ def verify_label(label_path: str, image_path: str) -> None:
 # ═══════════════════════════════════════════════════════════════════
 
 # Set DEBUG = True to generate a handful of overlay debug images
-DEBUG            = False
+DEBUG            = True
 DEBUG_MAX_IMAGES = 5
 
 if __name__ == "__main__":
@@ -303,7 +300,6 @@ if __name__ == "__main__":
         yolo_dir            = YOLO_DIR,
         classes             = CLASSES,
         train_ratio         = TRAIN_RATIO,
-        include_traversable = INCLUDE_TRAVERSABLE_LABEL,
         epsilon_frac        = CONTOUR_EPSILON_FRACTION,
         min_area            = MIN_CONTOUR_AREA_PX,
         seed                = RANDOM_SEED,

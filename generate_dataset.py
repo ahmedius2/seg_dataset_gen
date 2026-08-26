@@ -5,6 +5,7 @@ import os
 import random
 import math
 import json
+import imageio.v2 as imageio
 
 """
 generate_dataset.py
@@ -17,9 +18,10 @@ Per render it:
   • randomises UV tiling, sun direction, sun intensity
   • places the camera at a random altitude / slight off-nadir tilt
   • outputs one RGB PNG  →  output/images/XXXX.png
-  • outputs one binary mask PNG  →  output/masks/XXXX.png
-      (pixel = 0   → traversable ground)
-      (pixel = 255 → obstacle)
+  • outputs one class mask PNG    →  output/masks/XXXX.png
+      (pixel = 0   → traversable, 1 → obstacle, 2 → target)
+  • outputs one instance map PNG →  output/instances/XXXX.png
+      (pixel = 0   → background, otherwise BlenderProc instance ID)
 
 Usage
 -----
@@ -48,9 +50,9 @@ TEXTURES_ROOT = f"{ROOT_PATH}/scene_bl4/ground_textures"
 OUTPUT_DIR = f"{ROOT_PATH}/output"
 
 # How many image–mask pairs to generate
-NUM_IMAGES = 20
+NUM_IMAGES = 100
 
-# Render resolution (W, H) — 640×640 is the YOLOv8 default
+# Render resolution (W, H) — 640×640 is a common YOLO default
 IMAGE_RES = (640, 640)
 
 # ── Scene object names ──────────────────────────────────────────────
@@ -63,6 +65,7 @@ GROUND_OBJ_NAME = "Ground"
 # The match is case-insensitive.  Leave as [] to treat every mesh
 # that is NOT the ground plane as an obstacle automatically.
 OBSTACLE_KEYWORDS = ["obs_"]   # e.g. ["Rock", "Barrier", "Plank", "Drone"]
+TARGET_OBJ_NAME = "Target"
 
 # ── Drone / camera parameters ───────────────────────────────────────
 DRONE_ALT_MIN  = 35.0   # minimum flight altitude above ground (metres)
@@ -85,11 +88,15 @@ INNER_HALF = 25.0   # half of 50 m
 # ── Segmentation class IDs ──────────────────────────────────────────
 CLASS_TRAVERSABLE = 0   # ground   → mask pixel = 0   (black)
 CLASS_OBSTACLE    = 1   # obstacle → mask pixel = 255 (white)
+CLASS_TARGET      = 2   # Target object → class pixel = 2
 
 # ── Render quality ──────────────────────────────────────────────────
 # Lower sample count = faster renders but noisier images.
 # 64–128 is a good balance for training data.
 RENDER_SAMPLES = 64
+
+# Write display-only previews for the first few samples only.
+PREVIEW_MAX_SAMPLES = 5
 
 # ═══════════════════════════════════════════════════════════════════
 
@@ -289,8 +296,9 @@ def assign_category_ids(loaded_objs: list) -> None:
     BlenderProc's segmentation renderer reads this value per pixel.
 
     Tagging rules:
-      • Object whose name == GROUND_OBJ_NAME  →  CLASS_TRAVERSABLE (0)
-      • Everything else                        →  CLASS_OBSTACLE    (1)
+    • Object whose name == GROUND_OBJ_NAME  →  CLASS_TRAVERSABLE (0)
+    • Object whose name == TARGET_OBJ_NAME  →  CLASS_TARGET (2)
+    • Everything else                        →  CLASS_OBSTACLE    (1)
         (or use OBSTACLE_KEYWORDS to be selective — see CONFIG)
     """
     ground_found = False
@@ -302,6 +310,9 @@ def assign_category_ids(loaded_objs: list) -> None:
             obj.set_cp("category_id", CLASS_TRAVERSABLE)
             ground_found = True
             print(f"[INFO] '{name}' → CLASS_TRAVERSABLE ({CLASS_TRAVERSABLE})")
+        elif name == TARGET_OBJ_NAME:
+            obj.set_cp("category_id", CLASS_TARGET)
+            print(f"[INFO] '{name}' → CLASS_TARGET ({CLASS_TARGET})")
         elif not OBSTACLE_KEYWORDS:
             # treat every non-ground mesh as an obstacle
             obj.set_cp("category_id", CLASS_OBSTACLE)
@@ -383,13 +394,15 @@ def sample_drone_camera_pose() -> tuple:
 
 def save_pair(idx: int,
               rgb: np.ndarray,
-              segmap: np.ndarray,
+              class_map: np.ndarray,
+              instance_map: np.ndarray,
               img_dir: str,
               mask_dir: str,
+              instance_dir: str,
+              preview_dir: str,
               tex_name: str) -> None:
-    """Write RGB PNG and binary mask PNG for sample *idx*."""
+    """Write RGB, class-map, and instance-map PNGs for sample *idx*."""
     img_path  = os.path.join(img_dir,  f"{idx:04d}.png")
-    mask_path = os.path.join(mask_dir, f"{idx:04d}.png")
 
     # ── RGB ─────────────────────────────────────────────────────────
     rgb_u8 = rgb.astype(np.uint8)
@@ -415,31 +428,53 @@ def save_pair(idx: int,
     tmp_img.save()
     bpy.data.images.remove(tmp_img)
 
-    # ── Binary mask ─────────────────────────────────────────────────
-    # segmap dtype is int; obstacle pixels → 255, ground pixels → 0
-    binary = (segmap == CLASS_OBSTACLE).astype(np.uint8) * 255
+    # ── Class map ──────────────────────────────────────────────────
+    # Keep category IDs directly: 0=traversable, 1=obstacle, 2=target.
+    class_path = os.path.join(mask_dir, f"{idx:04d}.png")
+    imageio.imwrite(class_path, class_map.astype(np.uint8))
 
-    mask_img = bpy.data.images.new(
-        f"_tmp_mask_{idx}", width=binary.shape[1], height=binary.shape[0]
-    )
-    # Grayscale stored as RGBA in bpy
-    binary_flipped = binary[::-1, :]
-    rgba_mask = np.zeros(
-        (binary_flipped.shape[0], binary_flipped.shape[1], 4), dtype=np.float32
-    )
-    v = binary_flipped.astype(np.float32) / 255.0
-    rgba_mask[:, :, 0] = v
-    rgba_mask[:, :, 1] = v
-    rgba_mask[:, :, 2] = v
-    rgba_mask[:, :, 3] = 1.0
-    mask_img.pixels = rgba_mask.flatten().tolist()
-    mask_img.filepath_raw = mask_path
-    mask_img.file_format  = "PNG"
-    mask_img.save()
-    bpy.data.images.remove(mask_img)
+    # ── Instance map ───────────────────────────────────────────────
+    # BlenderProc instance IDs are stored as 16-bit grayscale PNG values.
+    instance_path = os.path.join(instance_dir, f"{idx:04d}.png")
+    max_instance = np.iinfo(np.uint16).max
+    if instance_map.max() > max_instance:
+        raise ValueError("Instance IDs exceed the 16-bit PNG range")
+    imageio.imwrite(instance_path, instance_map.astype(np.uint16))
+
+    # ── Display-only previews ─────────────────────────────────────
+    # These are intentionally separate from the numeric maps consumed by YOLO.
+    if idx >= PREVIEW_MAX_SAMPLES:
+        return
+
+    class_colours = np.array([
+        [0, 0, 0],       # background / traversable is overridden below
+        [220, 50, 47],   # obstacle: red
+        [40, 110, 220],  # target: blue
+    ], dtype=np.uint8)
+    class_preview = np.zeros((*class_map.shape, 3), dtype=np.uint8)
+    class_preview[class_map == CLASS_TRAVERSABLE] = [50, 190, 80]
+    class_preview[class_map == CLASS_OBSTACLE] = class_colours[1]
+    class_preview[class_map == CLASS_TARGET] = class_colours[2]
+
+    instance_preview = np.zeros((*instance_map.shape, 3), dtype=np.uint8)
+    for instance_id in np.unique(instance_map):
+        if instance_id == 0:
+            continue
+        colour = np.array([
+            (int(instance_id) * 67) % 256,
+            (int(instance_id) * 131) % 256,
+            (int(instance_id) * 197) % 256,
+        ], dtype=np.uint8)
+        instance_preview[instance_map == instance_id] = colour
+
+    rgb_preview = rgb_u8[:, :, :3]
+    overlay = (0.55 * rgb_preview + 0.45 * class_preview).astype(np.uint8)
+    imageio.imwrite(os.path.join(preview_dir, f"{idx:04d}_classes.png"), class_preview)
+    imageio.imwrite(os.path.join(preview_dir, f"{idx:04d}_instances.png"), instance_preview)
+    imageio.imwrite(os.path.join(preview_dir, f"{idx:04d}_overlay.png"), overlay)
 
     print(f"  [{idx+1:>4}/{NUM_IMAGES}] img={os.path.basename(img_path)}"
-          f"  mask={os.path.basename(mask_path)}"
+          f"  mask={os.path.basename(class_path)}"
           f"  tex={tex_name}")
 
 
@@ -464,8 +499,12 @@ def main():
     # 2. Output directories ─────────────────────────────────────────
     img_dir  = os.path.join(OUTPUT_DIR, "images")
     mask_dir = os.path.join(OUTPUT_DIR, "masks")
+    instance_dir = os.path.join(OUTPUT_DIR, "instances")
+    preview_dir = os.path.join(OUTPUT_DIR, "preview")
     os.makedirs(img_dir,  exist_ok=True)
     os.makedirs(mask_dir, exist_ok=True)
+    os.makedirs(instance_dir, exist_ok=True)
+    os.makedirs(preview_dir, exist_ok=True)
 
     # 3. Initialise BlenderProc ─────────────────────────────────────
     bproc.init()
@@ -501,7 +540,9 @@ def main():
 
     # 7. Renderer settings ──────────────────────────────────────────
     bproc.renderer.set_max_amount_of_samples(RENDER_SAMPLES)
-    bproc.renderer.enable_segmentation_output(map_by=["category_id"])
+    bproc.renderer.enable_segmentation_output(
+        map_by=["category_id", "instance", "name"]
+    )
 
     # 8. Generation loop ────────────────────────────────────────────
     print(f"\n[INFO] Generating {NUM_IMAGES} image–mask pairs …\n")
@@ -525,14 +566,16 @@ def main():
 
         data = bproc.renderer.render()
 
-        # data["colors"][0]              → RGB   numpy array (H, W, 3)
-        # data["category_id_segmaps"][0] → segmap numpy array (H, W) int
+        # Both maps have one entry per camera pose: arrays shaped (H, W).
         save_pair(
             i,
             data["colors"][0],
             data["category_id_segmaps"][0],
+            data["instance_segmaps"][0],
             img_dir,
             mask_dir,
+            instance_dir,
+            preview_dir,
             tex_set["name"],
         )
 
@@ -546,11 +589,14 @@ def main():
         "classes"       : {
             str(CLASS_TRAVERSABLE): "traversable",
             str(CLASS_OBSTACLE)   : "obstacle",
+            str(CLASS_TARGET)     : "target",
         },
-        "mask_encoding" : "grayscale — 0=traversable, 255=obstacle",
+        "mask_encoding" : "grayscale class IDs: 0=traversable, 1=obstacle, 2=target",
         "texture_sets"  : [s["name"] for s in texture_sets],
         "images_dir"    : img_dir,
         "masks_dir"     : mask_dir,
+        "instances_dir" : instance_dir,
+        "preview_dir"   : preview_dir,
     }
     meta_path = os.path.join(OUTPUT_DIR, "dataset_meta.json")
     with open(meta_path, "w") as f:

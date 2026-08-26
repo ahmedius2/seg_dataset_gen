@@ -1,8 +1,9 @@
 # Synthetic Aerial Segmentation Dataset Generator
 
-Generates a binary semantic segmentation dataset (traversable vs obstacle)
+Generates a three-class instance segmentation dataset (traversable, obstacle,
+and target)
 by rendering your Blender scene from simulated fixed-wing drone viewpoints,
-then converts the outputs into **YOLOv8-seg** format.
+then converts the outputs into **Ultralytics YOLO11-seg** format.
 
 ---
 
@@ -10,8 +11,8 @@ then converts the outputs into **YOLOv8-seg** format.
 
 | File | Purpose |
 |---|---|
-| `generate_dataset.py` | BlenderProc script — renders RGB images + binary masks |
-| `convert_to_yolo.py` | Standard Python script — converts masks → YOLO-seg labels |
+| `generate_dataset.py` | BlenderProc script — renders RGB images + class and instance maps |
+| `convert_to_yolo.py` | Standard Python script — converts maps → YOLO-seg labels |
 | `README_dataset_gen.md` | This file |
 
 ---
@@ -23,7 +24,7 @@ then converts the outputs into **YOLOv8-seg** format.
 pip install blenderproc
 
 # For convert_to_yolo.py (run with your system / venv Python, NOT blenderproc run)
-pip install opencv-python numpy pyyaml
+pip install opencv-python numpy pyyaml imageio
 
 # For training
 pip install ultralytics
@@ -64,6 +65,7 @@ TEXTURES_ROOT   = "/absolute/path/to/ground_textures"
 OUTPUT_DIR      = "/absolute/path/to/output"
 NUM_IMAGES      = 100
 GROUND_OBJ_NAME = "Ground"          # exact name from Step 1a
+TARGET_OBJ_NAME = "Target"          # exact target object name
 ```
 
 Also check the drone camera parameters and adjust to your real drone specs:
@@ -94,17 +96,23 @@ output/
 │   ├── 0001.png
 │   └── ...
 ├── masks/
-│   ├── 0000.png   ← binary mask (black=ground, white=obstacle)
+│   ├── 0000.png   ← class map (0=traversable, 1=obstacle, 2=target)
 │   ├── 0001.png
 │   └── ...
+├── instances/
+│   ├── 0000.png   ← 16-bit BlenderProc instance IDs
+│   └── ...
+├── preview/
+│   ├── 0000_classes.png   ← colorized classes for inspection
+│   ├── 0000_instances.png ← colorized instance IDs
+│   └── 0000_overlay.png   ← RGB with class colors overlaid
 └── dataset_meta.json
 ```
 
 > **Tip — check a few pairs visually before generating 100 images.**
-> Open an image and its corresponding mask side by side.
-> Every obstacle you see in the RGB should appear white in the mask.
-> If the ground is white and obstacles are black, you have the class IDs
-> swapped — swap `CLASS_TRAVERSABLE` and `CLASS_OBSTACLE` in the config.
+> Compare the RGB image with the class map and instance map. Every visible
+> object should have a non-zero instance ID and the `Target` object should
+> have class ID 2.
 
 ---
 
@@ -143,19 +151,19 @@ verifying that the contour extraction is working correctly.
 
 ---
 
-## Step 6 — Train YOLOv8-seg
+## Step 6 — Train YOLO11-seg
 
 ```bash
 yolo segment train \
     data=/absolute/path/to/yolo_dataset/dataset.yaml \
-    model=yolov8n-seg.pt \
+    model=yolo11n-seg.pt \
     epochs=100 \
     imgsz=640 \
     batch=16
 ```
 
-Start with `yolov8n-seg.pt` (nano) for fast iteration.
-Switch to `yolov8s-seg.pt` or `yolov8m-seg.pt` once the pipeline is validated.
+Start with `yolo11n-seg.pt` (nano) for fast iteration.
+Switch to `yolo11s-seg.pt` or `yolo11m-seg.pt` once the pipeline is validated.
 
 ---
 
@@ -163,8 +171,8 @@ Switch to `yolov8s-seg.pt` or `yolov8m-seg.pt` once the pipeline is validated.
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| All mask pixels are 0 (all black) | No obstacle category IDs assigned | Check `GROUND_OBJ_NAME` — it must match exactly (case-sensitive) |
-| Mask is inverted | Class IDs swapped | Swap `CLASS_TRAVERSABLE` and `CLASS_OBSTACLE` |
+| All class-map pixels are 0 | No category IDs assigned | Check object names and the generator log |
+| Target is labelled as obstacle | Target name mismatch | Set `TARGET_OBJ_NAME` to the exact Blender object name |
 | Textures not showing | Ground has no UV map | UV-unwrap the ground plane in Blender (Step 1d) |
 | `Object 'Ground' not found` | Name mismatch | Check the exact object name in Blender Properties panel |
 | Renders are very dark | Sun not created / low energy | Check `setup_or_randomise_sun()` or increase `DRONE_ALT_MAX` |

@@ -34,6 +34,7 @@ import shutil
 import numpy as np
 import yaml
 from pathlib import Path
+from PIL import Image
 
 # ═══════════════════════════════════════════════════════════════════
 #  CONFIG  ← must match what you set in generate_dataset.py
@@ -157,6 +158,13 @@ def instance_maps_to_yolo_lines(class_path: str,
     return lines
 
 
+def copy_png_without_exif(src_path: str, dst_path: str) -> None:
+    """Copy an RGB PNG while dropping metadata that triggers libpng warnings."""
+    with Image.open(src_path) as image:
+        clean_image = Image.fromarray(np.asarray(image)[..., :3])
+        clean_image.save(dst_path, format="PNG", exif=b"")
+
+
 def build_yolo_dataset(output_dir: str,
                        yolo_dir: str,
                        classes: list,
@@ -213,7 +221,7 @@ def build_yolo_dataset(output_dir: str,
 
             # Copy image
             dst_img = os.path.join(yolo_dir, "images", split, f"{stem}.png")
-            shutil.copy2(src_img, dst_img)
+            copy_png_without_exif(src_img, dst_img)
 
             # Generate YOLO label
             lines = instance_maps_to_yolo_lines(

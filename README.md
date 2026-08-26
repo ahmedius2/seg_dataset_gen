@@ -13,7 +13,8 @@ then converts the outputs into **Ultralytics YOLO11-seg** format.
 |---|---|
 | `generate_dataset.py` | BlenderProc script — renders RGB images + class and instance maps |
 | `convert_to_yolo.py` | Standard Python script — converts maps → YOLO-seg labels |
-| `README_dataset_gen.md` | This file |
+| `train_yolo11_seg.py` | Trains the Ultralytics YOLO11-seg nano model |
+| `README.md` | Project documentation and usage instructions |
 
 ---
 
@@ -154,13 +155,11 @@ verifying that the contour extraction is working correctly.
 ## Step 6 — Train YOLO11-seg
 
 ```bash
-yolo segment train \
-    data=/absolute/path/to/yolo_dataset/dataset.yaml \
-    model=yolo11n-seg.pt \
-    epochs=100 \
-    imgsz=640 \
-    batch=16
+python train_yolo11_seg.py
 ```
+
+Edit the training configuration at the top of `train_yolo11_seg.py` to change
+the model, GPU/CPU device, epochs, batch size, or output run name.
 
 Start with `yolo11n-seg.pt` (nano) for fast iteration.
 Switch to `yolo11s-seg.pt` or `yolo11m-seg.pt` once the pipeline is validated.

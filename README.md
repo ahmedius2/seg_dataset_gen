@@ -67,7 +67,16 @@ OUTPUT_DIR      = "/absolute/path/to/output"
 NUM_IMAGES      = 100
 GROUND_OBJ_NAME = "Ground"          # exact name from Step 1a
 TARGET_OBJ_NAME = "Target"          # exact target object name
+TARGET_TEXTURES_ROOT = "/absolute/path/to/target_textures"
 ```
+
+For each sample, obstacle objects matching `OBSTACLE_KEYWORDS` either retain
+their original layout or have their original positions shuffled. Randomized
+samples also apply the configured presence probability and slight scale
+variation. Target overlap is checked and the overlapping obstacle is hidden.
+`ORIGINAL_OBSTACLE_LAYOUT_FRACTION` controls the fraction of samples that keep
+the original layout. Set `OBSTACLE_KEYWORDS = []` to include every mesh except
+the ground and target.
 
 Also check the drone camera parameters and adjust to your real drone specs:
 
@@ -77,6 +86,10 @@ DRONE_ALT_MAX  = 60.0
 CAM_HFOV_DEG   = 70.0   # horizontal FOV of the camera
 MAX_TILT_DEG   = 8.0    # max off-nadir tilt
 ```
+
+Every render randomly selects one PNG from `TARGET_TEXTURES_ROOT` for the
+`Target` object. The generator also varies sun direction, sun energy, sun
+color, world illumination strength, and exposure for each sample.
 
 And make sure `INNER_CX`, `INNER_CY`, `INNER_HALF` match the actual world-space
 coordinates of your 50×50 m obstacle area.

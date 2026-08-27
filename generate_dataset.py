@@ -46,6 +46,9 @@ BLEND_FILE = f"{ROOT_PATH}/scene_bl4/scene_bl4.blend"
 # (each sub-folder must have a 'textures/' child with the map files)
 TEXTURES_ROOT = f"{ROOT_PATH}/scene_bl4/ground_textures"
 
+# Folder of PNG textures used to randomize the Target object.
+TARGET_TEXTURES_ROOT = f"{ROOT_PATH}/scene_bl4/target_textures"
+
 # Where to write images/ and masks/
 OUTPUT_DIR = f"{ROOT_PATH}/output"
 
@@ -171,6 +174,20 @@ def discover_texture_sets(root: str) -> list:
     return sets
 
 
+def discover_png_textures(root: str) -> list:
+    """Return PNG texture paths from a flat directory."""
+    if not os.path.isdir(root):
+        raise FileNotFoundError(f"TARGET_TEXTURES_ROOT not found: {root}")
+    textures = [
+        os.path.join(root, entry.name)
+        for entry in os.scandir(root)
+        if entry.is_file() and entry.name.lower().endswith(".png")
+    ]
+    if not textures:
+        raise RuntimeError(f"No PNG target textures found under '{root}'.")
+    return sorted(textures)
+
+
 # ───────────────────────────────────────────────────────────────────
 #  Helper: apply a PBR texture set to the ground plane
 # ───────────────────────────────────────────────────────────────────
@@ -247,6 +264,37 @@ def apply_ground_texture(obj_name: str, tex_set: dict) -> None:
         dn.inputs["Scale"].default_value = 0.008   # subtle bump
         links.new(n.outputs["Color"],       dn.inputs["Height"])
         links.new(dn.outputs["Displacement"], out.inputs["Displacement"])
+
+
+def apply_target_texture(obj_name: str, texture_path: str) -> None:
+    """Apply one selected PNG to Target using its existing UV layout."""
+    obj = bpy.data.objects.get(obj_name)
+    if obj is None:
+        print(f"[WARN] Object '{obj_name}' not found in scene — "
+              "check TARGET_OBJ_NAME in the CONFIG block.")
+        return
+    if not obj.data.materials:
+        material = bpy.data.materials.new(name="_gen_TargetMat")
+        obj.data.materials.append(material)
+    else:
+        material = obj.data.materials[0]
+
+    material.use_nodes = True
+    nodes = material.node_tree.nodes
+    links = material.node_tree.links
+    nodes.clear()
+
+    output = nodes.new("ShaderNodeOutputMaterial")
+    bsdf = nodes.new("ShaderNodeBsdfPrincipled")
+    tex_coord = nodes.new("ShaderNodeTexCoord")
+    image_node = nodes.new("ShaderNodeTexImage")
+    image_node.image = bpy.data.images.load(texture_path, check_existing=True)
+    image_node.image.colorspace_settings.name = "sRGB"
+
+    links.new(tex_coord.outputs["UV"], image_node.inputs["Vector"])
+    links.new(image_node.outputs["Color"], bsdf.inputs["Base Color"])
+    links.new(bsdf.outputs["BSDF"], output.inputs["Surface"])
+    bsdf.inputs["Roughness"].default_value = 0.5
 
 
 # ───────────────────────────────────────────────────────────────────
@@ -495,6 +543,8 @@ def main():
     print(f"\n[INFO] Found {len(texture_sets)} texture set(s):")
     for s in texture_sets:
         print(f"       • {s['name']}")
+    target_textures = discover_png_textures(TARGET_TEXTURES_ROOT)
+    print(f"[INFO] Found {len(target_textures)} target texture(s).")
 
     # 2. Output directories ─────────────────────────────────────────
     img_dir  = os.path.join(OUTPUT_DIR, "images")
@@ -552,9 +602,11 @@ def main():
         bproc.utility.reset_keyframes()
 
         tex_set = random.choice(texture_sets)
+        target_texture = random.choice(target_textures)
 
         # Randomise ground texture
         apply_ground_texture(GROUND_OBJ_NAME, tex_set)
+        apply_target_texture(TARGET_OBJ_NAME, target_texture)
 
         # Randomise sun
         setup_or_randomise_sun()
@@ -593,6 +645,7 @@ def main():
         },
         "mask_encoding" : "grayscale class IDs: 0=traversable, 1=obstacle, 2=target",
         "texture_sets"  : [s["name"] for s in texture_sets],
+        "target_textures": [os.path.basename(path) for path in target_textures],
         "images_dir"    : img_dir,
         "masks_dir"     : mask_dir,
         "instances_dir" : instance_dir,

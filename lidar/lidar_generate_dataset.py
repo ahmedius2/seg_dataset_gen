@@ -14,6 +14,9 @@ import os
 import sys
 import json
 import math
+import matplotlib
+matplotlib.use("Agg")
+from matplotlib import pyplot as plt
 
 try:
     import range_scanner  # BLAINDER addon
@@ -43,10 +46,12 @@ for scene in bpy.data.scenes:
 
 print(f"Generating {NUM_SCENES} scenes into {OUT_DIR}")
 
+
 # Number of LiDAR frames (flight poses) to simulate per scene. The lawn-mower
 # flight path is resampled to exactly this many evenly spaced poses.
 NUM_FRAMES = 3
 
+MIN_DIST_BTW_START_TARGET= 50.0  # meters: start/target must be far apart to avoid trivial paths
 PLANE_SIZE = 300.0        # visible ground plane size in meters
 AREA_SIZE = 50.0          # meters: inner active region for obstacle generation and flight path
 CELL_SIZE = 2.0            # 2x2 m grid cells
@@ -88,17 +93,56 @@ os.makedirs(OUT_DIR, exist_ok=True)
 # Scene construction
 # ---------------------------------------------------------------------------
 
-def create_ground_plane():
-    plane = bproc.object.create_primitive("PLANE", scale=[PLANE_SIZE / 2, PLANE_SIZE / 2, 1])
-    plane.set_name("ground")
-    mat = bproc.material.create("ground_mat")
-    mat.set_principled_shader_value("Base Color", [0.3, 0.28, 0.25, 1.0])
-    mat.set_principled_shader_value("Roughness", 0.9)
-    plane.replace_materials(mat)
-    return plane
+def create_ground_plane(start_cell=None, target_cell=None, paths=None):
+    """Create a single large ground plane and highlight just the start/target cells."""
+    base_ground = bproc.object.create_primitive("PLANE", scale=[PLANE_SIZE / 2, PLANE_SIZE / 2, 1])
+    base_ground.set_name("ground_base")
+    base_ground.set_location([0.0, 0.0, -0.05])
+    base_mat = bproc.material.create("ground_base_mat")
+    base_mat.set_principled_shader_value("Base Color", [0.3, 0.28, 0.25, 1.0])
+    base_mat.set_principled_shader_value("Roughness", 0.9)
+    base_ground.replace_materials(base_mat)
+
+    highlight_objects = []
+    start_cell = tuple(start_cell) if start_cell is not None else None
+    target_cell = tuple(target_cell) if target_cell is not None else None
+
+    for label, cell, color in [
+        ("start_cell", start_cell, [0.15, 0.8, 0.25, 1.0]),
+        ("target_cell", target_cell, [0.9, 0.18, 0.18, 1.0]),
+    ]:
+        if cell is None:
+            continue
+        x, y = cell_center_from_index(*cell)
+        cell_obj = bproc.object.create_primitive("PLANE", scale=[CELL_SIZE / 2, CELL_SIZE / 2, 1])
+        cell_obj.set_name(label)
+        cell_obj.set_location([x, y, 0.01])
+        mat = bproc.material.create(f"{label}_mat")
+        mat.set_principled_shader_value("Base Color", color)
+        mat.set_principled_shader_value("Roughness", 0.9)
+        cell_obj.replace_materials(mat)
+        highlight_objects.append(cell_obj)
+
+    return [base_ground] + highlight_objects
 
 
-def random_obstacle(idx, x=None, y=None):
+def obstacle_cluster_color(cluster_id):
+    palette = [
+        [0.98, 0.68, 0.12, 1.0],  # amber
+        [0.55, 0.44, 0.86, 1.0],  # violet
+        [0.12, 0.75, 0.72, 1.0],  # teal
+        [0.95, 0.42, 0.72, 1.0],  # rose
+        [0.68, 0.78, 0.24, 1.0],  # lime
+        [0.22, 0.56, 0.95, 1.0],  # sky
+        [0.94, 0.55, 0.18, 1.0],  # orange
+        [0.65, 0.33, 0.18, 1.0],  # brick
+        [0.72, 0.72, 0.72, 1.0],  # steel
+        [0.45, 0.60, 0.25, 1.0],  # olive
+    ]
+    return palette[cluster_id % len(palette)]
+
+
+def random_obstacle(idx, x=None, y=None, color=None):
     obstacle_type = random.choice(["box", "cylinder", "cone"])
     if x is None:
         x = random.uniform(-AREA_SIZE / 2 + 2, AREA_SIZE / 2 - 2)
@@ -123,9 +167,9 @@ def random_obstacle(idx, x=None, y=None):
     obj.set_name(f"obstacle_{idx}")
 
     mat = bproc.material.create(f"obs_mat_{idx}")
-    mat.set_principled_shader_value(
-        "Base Color", [random.uniform(0.1, 0.8) for _ in range(3)] + [1.0]
-    )
+    if color is None:
+        color = [random.uniform(0.1, 0.8) for _ in range(3)] + [1.0]
+    mat.set_principled_shader_value("Base Color", color)
     obj.replace_materials(mat)
     return obj
 
@@ -255,15 +299,19 @@ def generate_cell_paths(start, target, min_paths=2, max_paths=5, rng=random):
 
     return paths if len(paths) >= min_paths else []
 
-def sample_start_target_in_grid(min_dist=40.0):
-    """Pick a start and goal cell that are far apart and likely connected."""
-    for _ in range(5000):
-        start = (random.randrange(CELL_COUNT), random.randrange(CELL_COUNT))
-        target = (random.randrange(CELL_COUNT), random.randrange(CELL_COUNT))
-        if cell_distance_meters(start, target) >= min_dist:
-            return start, target
-    raise RuntimeError("Unable to sample valid start/target cells for the 2x2 m grid.")
+def sample_start_target_in_free_cells(free_cells, min_dist=40.0):
+    """Pick two free cells that are far apart after the obstacle layout is fixed."""
+    free_list = list(free_cells)
+    if len(free_list) < 2:
+        raise RuntimeError("Not enough free cells to choose a start and target.")
 
+    for _ in range(5000):
+        start = random.choice(free_list)
+        target = random.choice(free_list)
+        if start != target and cell_distance_meters(start, target) >= min_dist:
+            return start, target
+
+    raise RuntimeError("Unable to sample valid start/target cells from the free-cell set.")
 
 
 # ----
@@ -353,24 +401,26 @@ def _halo(cells, radius=1):
     return ring - set(cells)
 
 
-def build_cell_occupancy(paths, num_clusters=10, num_walls=5,
+def build_cell_occupancy(num_clusters=10, num_walls=5,
                          cluster_min=15, cluster_max=25,
                          min_cluster_dist=5.0, halo_radius=1, rng=random):
-    """Open arena floor with well-spread rubble clusters + wall fragments.
+    """Build the obstacle field first, then derive the final free/occupied cells.
 
-    - Corridors (plus clearance buffer) are guaranteed clear.
-    - Cluster seeds are placed via blue-noise so they spread evenly.
-    - A halo ring is added to `forbidden` after each cluster so clusters
-      cannot touch or fuse; sizes are honored because blobs grow into space
-      that is known to be clear.
+    This intentionally skips any precomputed path corridors. The occupied set is
+    the actual result of obstacle generation, and free cells are simply the cells
+    that remain after those obstacles are placed.
     """
-    forbidden = _corridor_clearance(paths, radius_cells=1)
+    forbidden = set()
     occupied = set()
+    cluster_assignments = {}
 
     # Walls first (long thin slabs), then fence them off with a halo too.
     for _ in range(num_walls):
         wall = _make_wall(forbidden, occupied, rng)
         if wall:
+            cluster_id = len(cluster_assignments)
+            for cell in wall:
+                cluster_assignments[cell] = cluster_id
             occupied.update(wall)
             forbidden |= _halo(wall, halo_radius)
 
@@ -382,13 +432,15 @@ def build_cell_occupancy(paths, num_clusters=10, num_walls=5,
             continue
         size = rng.randint(cluster_min, cluster_max)
         blob = _grow_blob(seed, size, forbidden, occupied, rng)
+        cluster_id = len(cluster_assignments)
+        for cell in blob:
+            cluster_assignments[cell] = cluster_id
         occupied.update(blob)
-        # Reserve a ring around this cluster so the next one can't fuse into it.
         forbidden |= _halo(blob, halo_radius)
 
     all_cells = {(r, c) for r in range(CELL_COUNT) for c in range(CELL_COUNT)}
     free_cells = all_cells - occupied
-    return free_cells, occupied
+    return free_cells, occupied, cluster_assignments
 
 def rasterize_cell_occupancy(occupied_cells, cell_size=CELL_SIZE, area_size=AREA_SIZE, grid_n=GRID_N):
     grid = np.zeros((grid_n, grid_n), dtype=np.uint8)
@@ -409,6 +461,36 @@ def rasterize_cell_occupancy(occupied_cells, cell_size=CELL_SIZE, area_size=AREA
         grid[y_min:y_max, x_min:x_max] = 1
 
     return grid
+
+
+def cell_to_grid_xy(cell, cell_size=CELL_SIZE, area_size=AREA_SIZE, grid_n=GRID_N):
+    """Convert a (row, col) cell index to occupancy-grid pixel coordinates."""
+    row, col = cell
+    res = area_size / grid_n
+    x = (col + 0.5) * cell_size / res
+    y = (row + 0.5) * cell_size / res
+    return x, y
+
+
+def save_occupancy_grid_preview(grid, output_path, start_cell=None, target_cell=None):
+    """Save a quick visualization for the ground-truth occupancy grid."""
+    fig, ax = plt.subplots(figsize=(6, 6), dpi=180)
+    image = ax.imshow(grid, cmap="gray_r", origin="lower", vmin=0, vmax=1)
+    ax.set_title("Ground-truth occupancy grid")
+    ax.set_xlabel("grid x")
+    ax.set_ylabel("grid y")
+
+    if start_cell is not None:
+        sx, sy = cell_to_grid_xy(start_cell)
+        ax.plot(sx, sy, "go", markersize=7, label="start")
+    if target_cell is not None:
+        tx, ty = cell_to_grid_xy(target_cell)
+        ax.plot(tx, ty, "ro", markersize=7, label="target")
+
+    fig.colorbar(image, ax=ax, fraction=0.046, pad=0.04, label="occupied")
+    fig.tight_layout()
+    fig.savefig(output_path, bbox_inches="tight")
+    plt.close(fig)
 
 
 # ---------------------------------------------------------------------------
@@ -640,8 +722,6 @@ def render_camera_frames(cam_obj, scene_dir, flight_poses, attitudes, image_dir_
 for scene_idx in range(NUM_SCENES):
     bproc.clean_up()
 
-    create_ground_plane()
-
     sun = bproc.types.Light()
     sun.set_type("SUN")
     sun.set_location([0, 0, 50])
@@ -660,24 +740,32 @@ for scene_idx in range(NUM_SCENES):
     rim.set_energy(2500)
     rim.set_scale([4, 4, 4])
 
+    free_cells, occupied_cells, cluster_assignments = build_cell_occupancy()
+
     for _ in range(200):
-        start_cell, target_cell = sample_start_target_in_grid(min_dist=40.0)
-        paths = generate_cell_paths(start_cell, target_cell, min_paths=2, max_paths=5)
-        if len(paths) >= 2:
+        try:
+            start_cell, target_cell = sample_start_target_in_free_cells(free_cells, min_dist=MIN_DIST_BTW_START_TARGET)
             break
+        except RuntimeError:
+            free_cells, occupied_cells, cluster_assignments = build_cell_occupancy()
     else:
-        raise RuntimeError(f"Unable to find a valid start/target pair with at least two non-overlapping paths for scene {scene_idx}.")
+        raise RuntimeError(f"Unable to find a valid start/target pair after obstacle placement for scene {scene_idx}.")
 
-    free_cells, occupied_cells = build_cell_occupancy(paths)
+    print(f"[scene {scene_idx}] start_cell={start_cell} target_cell={target_cell} free_cells={len(free_cells)} occupied={len(occupied_cells)}")
 
+    create_ground_plane(start_cell=start_cell, target_cell=target_cell, paths=[])
+
+    print("Ground plane created. Generating obstacles...")
     obstacle_info = []
     cell_obstacles = sorted(occupied_cells)
     for idx, (row, col) in enumerate(cell_obstacles):
         x, y = cell_center_from_index(row, col)
-        obj = random_obstacle(idx, x=x, y=y)
+        cluster_id = cluster_assignments.get((row, col), 0)
+        obj = random_obstacle(idx, x=x, y=y, color=obstacle_cluster_color(cluster_id))
         cx, cy, r = obstacle_footprint_radius(obj)
         obstacle_info.append((cx, cy, r))
 
+    print(f"Obstacles generated: {len(obstacle_info)}. Rasterizing occupancy grid...")
     occupancy_grid = rasterize_cell_occupancy(occupied_cells)
     start_xy = cell_center_from_index(*start_cell)
     target_xy = cell_center_from_index(*target_cell)
@@ -705,6 +793,7 @@ for scene_idx in range(NUM_SCENES):
     # Save occupancy grid + metadata
 
     np.save(os.path.join(scene_dir, "occupancy_grid.npy"), occupancy_grid)
+    save_occupancy_grid_preview(occupancy_grid, os.path.join(scene_dir, "occupancy_grid.png"), start_cell, target_cell)
 
     meta = {
         "plane_size": PLANE_SIZE,
@@ -718,9 +807,11 @@ for scene_idx in range(NUM_SCENES):
         "target_cell": list(target_cell),
         "start": start_xy,
         "target": target_xy,
-        "paths": [path for path in paths],
-        "num_paths": len(paths),
+        "paths": [],
+        "num_paths": 0,
         "num_obstacles": num_obstacles,
+        "free_cells": sorted(free_cells),
+        "occupied_cells": sorted(occupied_cells),
         "sensor": "robosense_e1r",
         "sensor_params": ROBOSENSE_E1R_PARAMS,
         "flight_poses": flight_poses,

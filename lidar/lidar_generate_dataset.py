@@ -34,6 +34,7 @@ from dataset_config import (
     MASK_DIR,
     MASK_PX,
     NUM_SCENES,
+    NUM_SCENES_TO_EXPORT_BLEND,
     OUT_DIR,
     PLANE_SIZE,
     ROBOSENSE_E1R_PARAMS,
@@ -187,6 +188,11 @@ def main():
 
         print(f"[scene {scene_idx}] sensor=robosense_e1r obstacles={num_obstacles} "
               f"altitude={altitude:.1f}m start={start_xy} target={target_xy}")
+
+        if scene_idx < NUM_SCENES_TO_EXPORT_BLEND:
+            blend_path = os.path.join(scene_dir, f"scene_{scene_idx:04d}.blend")
+            bpy.ops.wm.save_as_mainfile(filepath=blend_path, copy=True)
+            print(f"[scene {scene_idx}] exported blend file: {blend_path}")
 
     print("Done.")
 

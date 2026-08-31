@@ -135,15 +135,21 @@ def build_rubble_mesh(blob, faded, idx, rng=random):
         wx = -AREA_SIZE_M / 2 + gx * PIX_SIZE
         wy = AREA_SIZE_M / 2 - gy * PIX_SIZE
 
+        # A vertex sits on the blob's perimeter if any of its 4 surrounding
+        # cells falls outside the blob; pin those to the ground so the mesh
+        # boundary never floats above z=0.
+        neighbor_cells = [(-1, -1), (0, -1), (-1, 0), (0, 0)]
+        is_boundary = any((gx + dc, gy + dr) not in occ for dc, dr in neighbor_cells)
+
         h = 0.0
-        for dc, dr in [(-1, -1), (0, -1), (-1, 0), (0, 0)]:
-            pc, pr = gx + dc, gy + dr
-            if (pc, pr) in occ:
+        if not is_boundary:
+            for dc, dr in neighbor_cells:
+                pc, pr = gx + dc, gy + dr
                 sel = (xs == pc) & (ys == pr)
                 if sel.any():
                     h = max(h, float(faded[pr, pc]) * max_h)
-        h += rng.gauss(0.0, RUBBLE_SURFACE_NOISE)
-        h = max(h, 0.0)
+            h += rng.gauss(0.0, RUBBLE_SURFACE_NOISE)
+            h = max(h, 0.0)
         vindex[key] = len(verts)
         verts.append([wx, wy, h])
         return vindex[key]

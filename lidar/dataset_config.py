@@ -16,6 +16,10 @@ os.makedirs(OUT_DIR, exist_ok=True)
 # flight path is resampled to exactly this many evenly spaced poses.
 NUM_FRAMES = 5
 
+# Export the first N generated scenes as .blend files (into each scene's
+# output dir) for manual inspection in Blender. Set to 0 to disable.
+NUM_SCENES_TO_EXPORT_BLEND = 1
+
 MIN_DIST_BTW_START_TARGET = 50.0  # meters: start/target must be far apart to avoid trivial paths
 PLANE_SIZE = 300.0               # visible ground plane size in meters
 AREA_SIZE_M = 50.0               # meters: inner active region for obstacle generation and flight path

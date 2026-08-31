@@ -11,6 +11,10 @@ from dataset_config import (
     FLIGHT_ALT_MAX,
     FLIGHT_ALT_MIN,
     GRID_N,
+    GROUND_NOISE_AMPLITUDE_M,
+    GROUND_NOISE_CELL_SIZE_M,
+    GROUND_NOISE_MICRO_STD_M,
+    GROUND_NOISE_SCALE,
     LIDAR_FOV_X_DEG,
     LIDAR_FOV_Y_DEG,
     MAX_PITCH_DEV_DEG,
@@ -26,6 +30,45 @@ try:
     import range_scanner
 except ImportError:
     range_scanner = None
+
+
+def create_noisy_ground_mesh(
+    name,
+    size_m,
+    cell_size_m=GROUND_NOISE_CELL_SIZE_M,
+    amplitude_m=GROUND_NOISE_AMPLITUDE_M,
+    noise_scale=GROUND_NOISE_SCALE,
+    micro_std_m=GROUND_NOISE_MICRO_STD_M,
+    rng=random,
+):
+    """Build a subdivided ground plane with Perlin undulation + per-vertex jitter.
+
+    Replaces a perfectly flat plane with a rough terrain surface so it looks
+    (and scans) more realistically.
+    """
+    import bmesh
+    from mathutils import noise as bnoise
+
+    segments = max(2, int(round(size_m / cell_size_m)))
+    bm = bmesh.new()
+    bmesh.ops.create_grid(bm, x_segments=segments, y_segments=segments, size=size_m / 2.0)
+
+    # Random offset so every scene gets a differently seeded noise pattern.
+    ox, oy = rng.uniform(0.0, 1000.0), rng.uniform(0.0, 1000.0)
+    for v in bm.verts:
+        n = bnoise.noise((v.co.x * noise_scale + ox, v.co.y * noise_scale + oy, 0.0)) - 0.5
+        v.co.z += n * 2.0 * amplitude_m
+        v.co.z += rng.gauss(0.0, micro_std_m)
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+
+    mesh = bpy.data.meshes.new(f"{name}_mesh")
+    bm.to_mesh(mesh)
+    bm.free()
+    mesh.update()
+
+    blender_obj = bpy.data.objects.new(name, mesh)
+    bpy.context.scene.collection.objects.link(blender_obj)
+    return bproc.types.MeshObject(blender_obj)
 
 
 def create_ground_plane(start_cell=None, target_cell=None):

@@ -27,6 +27,16 @@ CELL_SIZE_M = 0.5                # 0.5x0.5 m grid cells
 CELL_COUNT = int(AREA_SIZE_M / CELL_SIZE_M)
 GRID_N = int(AREA_SIZE_M / CELL_SIZE_M)
 
+# NOTE: increase amplitude and scale to make the terrain more bumpy, or decrease to make it flatter.
+
+# Ground plane surface roughness: a subdivided grid perturbed with low-frequency
+# Perlin noise (macro undulation) plus small per-vertex jitter (micro roughness),
+# so the base terrain is no longer perfectly flat.
+GROUND_NOISE_CELL_SIZE_M = 0.5    # meters per grid subdivision (smaller = more detail, more geometry)
+GROUND_NOISE_AMPLITUDE_M = 0.3    # meters, max height of the low-frequency undulation
+GROUND_NOISE_SCALE = 0.3         # Perlin noise frequency (per meter); smaller = broader bumps
+GROUND_NOISE_MICRO_STD_M = 0.1   # meters, Gaussian per-vertex jitter (fine-grained roughness)
+
 FLIGHT_ALT_MIN = 30.0
 FLIGHT_ALT_MAX = 40.0
 
@@ -72,7 +82,7 @@ RED_OTHER_MAX = 0.35              # ... while G and B are low
 # Rubble elevation. Per-blob peak height is drawn uniformly in this range.
 RUBBLE_MAX_HEIGHT_MIN = 1.0        # meters (configurable)
 RUBBLE_MAX_HEIGHT_MAX = 4.0        # meters (configurable)
-RUBBLE_SURFACE_NOISE = 0.10        # meters, per-vertex Gaussian roughness of rubble
+RUBBLE_SURFACE_NOISE = 0.20        # meters, per-vertex Gaussian roughness of rubble
 RUBBLE_MIN_BLOB_PX = 3             # ignore tiny specks smaller than this many px
 
 # Barricade geometry (oriented box aligned to each red blob's major axis).

@@ -21,6 +21,7 @@ from blender_pipeline import (
     build_flight_attitudes,
     build_flight_path,
     create_lidar_scanner_object,
+    create_noisy_ground_mesh,
     create_render_camera_object,
     render_camera_frames,
     run_blainder_scan,
@@ -108,8 +109,7 @@ def main():
               f"rubble={len(rubble_info)} barricades={len(barricade_info)} "
               f"cleared_barricade={scene['cleared_barricade_index']}")
 
-        base_ground = bproc.object.create_primitive("PLANE", scale=[PLANE_SIZE / 2, PLANE_SIZE / 2, 1])
-        base_ground.set_name("ground_base")
+        base_ground = create_noisy_ground_mesh("ground_base", PLANE_SIZE, rng=random)
         base_ground.set_location([0.0, 0.0, -0.05])
         base_mat = bproc.material.create("ground_base_mat")
         base_mat.set_principled_shader_value("Base Color", [0.3, 0.28, 0.25, 1.0])

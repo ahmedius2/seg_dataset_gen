@@ -18,7 +18,7 @@ NUM_FRAMES = 5
 
 # Export the first N generated scenes as .blend files (into each scene's
 # output dir) for manual inspection in Blender. Set to 0 to disable.
-NUM_SCENES_TO_EXPORT_BLEND = 1
+NUM_SCENES_TO_EXPORT_BLEND = NUM_SCENES
 
 MIN_DIST_BTW_START_TARGET = 50.0  # meters: start/target must be far apart to avoid trivial paths
 PLANE_SIZE = 300.0               # visible ground plane size in meters
@@ -33,8 +33,8 @@ GRID_N = int(AREA_SIZE_M / CELL_SIZE_M)
 # Perlin noise (macro undulation) plus small per-vertex jitter (micro roughness),
 # so the base terrain is no longer perfectly flat.
 GROUND_NOISE_CELL_SIZE_M = 0.5    # meters per grid subdivision (smaller = more detail, more geometry)
-GROUND_NOISE_AMPLITUDE_M = 0.3    # meters, max height of the low-frequency undulation
-GROUND_NOISE_SCALE = 0.3         # Perlin noise frequency (per meter); smaller = broader bumps
+GROUND_NOISE_AMPLITUDE_M = 0.2    # meters, max height of the low-frequency undulation
+GROUND_NOISE_SCALE = 0.2         # Perlin noise frequency (per meter); smaller = broader bumps
 GROUND_NOISE_MICRO_STD_M = 0.1   # meters, Gaussian per-vertex jitter (fine-grained roughness)
 
 FLIGHT_ALT_MIN = 30.0
@@ -81,7 +81,7 @@ RED_OTHER_MAX = 0.35              # ... while G and B are low
 
 # Rubble elevation. Per-blob peak height is drawn uniformly in this range.
 RUBBLE_MAX_HEIGHT_MIN = 1.0        # meters (configurable)
-RUBBLE_MAX_HEIGHT_MAX = 4.0        # meters (configurable)
+RUBBLE_MAX_HEIGHT_MAX = 5.0        # meters (configurable)
 RUBBLE_SURFACE_NOISE = 0.20        # meters, per-vertex Gaussian roughness of rubble
 RUBBLE_MIN_BLOB_PX = 3             # ignore tiny specks smaller than this many px
 
@@ -91,3 +91,5 @@ BARRICADE_MIN_BLOB_PX = 1          # ignore tiny red specks
 
 # Start/target sampling in mask space.
 MIN_DIST_BTW_START_TARGET_PX = MIN_DIST_BTW_START_TARGET / PIX_SIZE
+
+SOURCE_SCENE_PATH = "/home/dho/work/ileri_otonom/seg_dataset_gen/bl_scenes/newscene/rubbles.blend"

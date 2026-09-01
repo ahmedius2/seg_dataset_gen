@@ -39,6 +39,7 @@ from dataset_config import (
     OUT_DIR,
     PLANE_SIZE,
     ROBOSENSE_E1R_PARAMS,
+    SOURCE_SCENE_PATH
 )
 from mask_scene import (
     build_scene_from_mask,
@@ -76,25 +77,14 @@ def main():
         bproc.clean_up()
         print(f"[scene {scene_idx}] reconstructing from mask: {mask_path}")
 
+        scene = build_scene_from_mask(mask_path, SOURCE_SCENE_PATH, rng=random)
+
+        # randomize sun location and energy to simulate different times of day and lighting conditions
         sun = bproc.types.Light()
         sun.set_type("SUN")
-        sun.set_location([0, 0, 50])
+        sun.set_location([0, 0, 10])
         sun.set_energy(5)
         sun.set_rotation_euler([math.radians(60), 0.0, math.radians(45)])
-
-        fill = bproc.types.Light()
-        fill.set_type("AREA")
-        fill.set_location([10, -10, 12])
-        fill.set_energy(3000)
-        fill.set_scale([4, 4, 4])
-
-        rim = bproc.types.Light()
-        rim.set_type("AREA")
-        rim.set_location([-12, 8, 12])
-        rim.set_energy(2500)
-        rim.set_scale([4, 4, 4])
-
-        scene = build_scene_from_mask(mask_path, rng=random)
 
         start_px = scene["start_px"]
         target_px = scene["target_px"]
@@ -128,6 +118,14 @@ def main():
             mmat.set_principled_shader_value("Roughness", 0.9)
             marker.replace_materials(mmat)
 
+        scene_dir = os.path.join(OUT_DIR, f"scene_{scene_idx:04d}")
+        os.makedirs(scene_dir, exist_ok=True)
+
+        if scene_idx < NUM_SCENES_TO_EXPORT_BLEND:
+            blend_path = os.path.join(scene_dir, f"scene_{scene_idx:04d}.blend")
+            bpy.ops.wm.save_as_mainfile(filepath=blend_path, copy=True)
+            print(f"[scene {scene_idx}] exported blend file: {blend_path}")
+
         print(f"Scene reconstructed from mask. Occupancy grid shape: {occupancy_grid.shape}")
 
         altitude = random.uniform(FLIGHT_ALT_MIN, FLIGHT_ALT_MAX)
@@ -138,8 +136,6 @@ def main():
         render_camera = create_render_camera_object(f"RenderCamera_scene{scene_idx}")
         num_frames = animate_flight_path(lidar_scanner, flight_poses, attitudes)
 
-        scene_dir = os.path.join(OUT_DIR, f"scene_{scene_idx:04d}")
-        os.makedirs(scene_dir, exist_ok=True)
 
         render_camera_frames(render_camera, scene_dir, flight_poses, attitudes, image_dir_name="camera")
         run_blainder_scan(lidar_scanner, scene_dir, num_frames, ROBOSENSE_E1R_PARAMS)
@@ -189,10 +185,7 @@ def main():
         print(f"[scene {scene_idx}] sensor=robosense_e1r obstacles={num_obstacles} "
               f"altitude={altitude:.1f}m start={start_xy} target={target_xy}")
 
-        if scene_idx < NUM_SCENES_TO_EXPORT_BLEND:
-            blend_path = os.path.join(scene_dir, f"scene_{scene_idx:04d}.blend")
-            bpy.ops.wm.save_as_mainfile(filepath=blend_path, copy=True)
-            print(f"[scene {scene_idx}] exported blend file: {blend_path}")
+
 
     print("Done.")
 

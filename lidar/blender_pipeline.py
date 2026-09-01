@@ -75,7 +75,7 @@ def create_ground_plane(start_cell=None, target_cell=None):
     """Create a single large ground plane and highlight just the start/target cells."""
     base_ground = bproc.object.create_primitive("PLANE", scale=[300.0 / 2, 300.0 / 2, 1])
     base_ground.set_name("ground_base")
-    base_ground.set_location([0.0, 0.0, -0.05])
+    base_ground.set_location([0.0, 0.0, 0])
     base_mat = bproc.material.create("ground_base_mat")
     base_mat.set_principled_shader_value("Base Color", [0.3, 0.28, 0.25, 1.0])
     base_mat.set_principled_shader_value("Roughness", 0.9)

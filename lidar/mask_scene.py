@@ -181,8 +181,9 @@ def build_rubble_mesh(blob, faded, idx, rng=random):
                 num_pixels=int(len(xs)))
 
 
-def build_barricade(blob_pixels, idx):
-    """Build one oriented barricade box aligned to a red blob's major axis."""
+
+def build_barricade(blob_pixels, idx, barrier=None):
+    """Build one oriented barricade by copying a barrier object aligned to blob's major axis."""
 
     ys = np.array([p[0] for p in blob_pixels], dtype=np.float32)
     xs = np.array([p[1] for p in blob_pixels], dtype=np.float32)
@@ -204,16 +205,36 @@ def build_barricade(blob_pixels, idx):
     angle = math.atan2(-major[1], major[0])
 
     wx, wy = mask_px_to_world(cx, cy)
-    obj = bproc.object.create_primitive(
-        "CUBE", scale=[length / 2.0, width / 2.0, BARRICADE_HEIGHT / 2.0])
-    obj.set_location([wx, wy, BARRICADE_HEIGHT / 2.0])
-    obj.set_rotation_euler([0.0, 0.0, angle])
-    obj.set_name(f"barricade_{idx}")
 
-    mat = bproc.material.create(f"barricade_mat_{idx}")
-    mat.set_principled_shader_value("Base Color", [0.85, 0.15, 0.15, 1.0])
-    mat.set_principled_shader_value("Roughness", 0.8)
-    obj.replace_materials(mat)
+    # Copy a barrier object if available, otherwise create a primitive
+    # ctrl + a , rotation and scale, do this in blender for each object in the source scene before running the script
+    if barrier:
+        # Check barrier y dimension and copy multiple times to match the required length
+        barrier_length = barrier.dimensions.x
+        num_copies = max(1, int(math.floor(length / (barrier_length + 0.2))))  # add small gap between copies
+        # spread copies evenly along the barricade line (major axis direction)
+        for i in range(num_copies):
+            offset = (i - (num_copies - 1) / 2) * (barrier_length  + 0.2)
+            obj_data = barrier.data.copy()
+            obj = bpy.data.objects.new(f"barricade_{idx}_{i}", obj_data)
+            bpy.context.scene.collection.objects.link(obj)
+            # Place along the barricade line (perpendicular to blob's minor axis)
+            # Use perpendicular direction so barriers align along the line
+            # perp_angle = angle + math.pi / 2
+            obj.location = [wx + offset * math.cos(angle), wy + offset * math.sin(angle), barrier.dimensions.z / 2.0]
+            obj.rotation_euler = [0.0, 0.0, angle]  # rotate to align with the barricade line
+            obj.scale = [1.0, 1.0, 1.0]  # keep original scale
+    else:
+        obj = bproc.object.create_primitive(
+            "CUBE", scale=[length / 2.0, width / 2.0, BARRICADE_HEIGHT / 2.0])
+        obj.set_name(f"barricade_{idx}")
+        mat = bproc.material.create(f"barricade_mat_{idx}")
+        mat.set_principled_shader_value("Base Color", [0.85, 0.15, 0.15, 1.0]) # red
+        mat.set_principled_shader_value("Roughness", 0.8)
+        obj.replace_materials(mat)
+        # bpy.context.scene.collection.objects.link(obj)
+        obj.location = [wx, wy, BARRICADE_HEIGHT / 2.0]
+        obj.rotation_euler = [0.0, 0.0, angle]
 
     return dict(idx=idx, center_world=[wx, wy], length=length, width=width,
                 yaw_rad=angle, num_pixels=int(len(xs)))
@@ -272,8 +293,23 @@ def sample_start_target_free_px(black_mask, red_mask, min_dist_px,
     raise RuntimeError("Unable to sample start/target far enough apart.")
 
 
-def build_scene_from_mask(mask_path, rng=random):
+def build_scene_from_mask(mask_path, source_scene_path, rng=random):
     """Reconstruct rubble piles + barricades for one mask."""
+    # Load source blender scene which has barrier and rubble meshes, we will add them to the scene based on the mask
+    print(f"Loading source scene: {source_scene_path}")
+    if not os.path.isfile(source_scene_path):
+        raise FileNotFoundError(f"Source scene file not found: {source_scene_path}")
+    bpy.ops.wm.open_mainfile(filepath=source_scene_path)
+
+    # Extract barrier objects from source scene
+    barrier_objects, brick_objects = [], []
+    if "Barriers" in bpy.data.collections:
+        barrier_objects.extend(bpy.data.collections["Barriers"].objects)
+    if "Brick" in bpy.data.collections:
+        brick_objects.extend(bpy.data.collections["Brick"].objects)
+    print(f"Found {len(barrier_objects)} barrier objects from source scene")
+    print(f"Found {len(brick_objects)} brick objects from source scene")
+
     mask = load_mask(mask_path)
     black_mask, red_mask = classify_mask(mask)
 
@@ -297,7 +333,9 @@ def build_scene_from_mask(mask_path, rng=random):
     for i, blob in enumerate(red_blobs):
         if i == cleared_barricade_index:
             continue
-        barricade_info.append(build_barricade(blob, i))
+        #choose a random baricade index from the available barrier objects to use for this barricade
+        barrier = rng.choice(barrier_objects) if barrier_objects else None
+        barricade_info.append(build_barricade(blob, i, barrier=barrier))
 
     occupancy_grid = rasterize_mask_occupancy(
         black_mask, red_mask, cleared_red_pixels=cleared_red_pixels)

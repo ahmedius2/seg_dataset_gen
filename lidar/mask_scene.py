@@ -20,7 +20,8 @@ from dataset_config import (
     RUBBLE_MAX_HEIGHT_MAX,
     RUBBLE_MAX_HEIGHT_MIN,
     RUBBLE_MIN_BLOB_PX,
-    RUBBLE_SURFACE_NOISE,
+    RUBBLE_SURFACE_MIN_NOISE,
+    RUBBLE_SURFACE_MAX_NOISE,
     MIN_DIST_BTW_START_TARGET_PX,
 )
 
@@ -148,7 +149,7 @@ def build_rubble_mesh(blob, faded, idx, rng=random):
                 sel = (xs == pc) & (ys == pr)
                 if sel.any():
                     h = max(h, float(faded[pr, pc]) * max_h)
-            h += rng.gauss(0.0, RUBBLE_SURFACE_NOISE)
+            h += rng.gauss(0.0, rng.uniform(RUBBLE_SURFACE_MIN_NOISE, RUBBLE_SURFACE_MAX_NOISE))
             h = max(h, 0.0)
         vindex[key] = len(verts)
         verts.append([wx, wy, h])
@@ -221,7 +222,7 @@ def build_barricade(blob_pixels, idx, barrier=None):
             # Place along the barricade line (perpendicular to blob's minor axis)
             # Use perpendicular direction so barriers align along the line
             # perp_angle = angle + math.pi / 2
-            obj.location = [wx + offset * math.cos(angle), wy + offset * math.sin(angle), barrier.dimensions.z / 2.0]
+            obj.location = [wx + offset * math.cos(angle), wy + offset * math.sin(angle), -0.05]
             obj.rotation_euler = [0.0, 0.0, angle]  # rotate to align with the barricade line
             obj.scale = [1.0, 1.0, 1.0]  # keep original scale
     else:
@@ -302,13 +303,11 @@ def build_scene_from_mask(mask_path, source_scene_path, rng=random):
     bpy.ops.wm.open_mainfile(filepath=source_scene_path)
 
     # Extract barrier objects from source scene
-    barrier_objects, brick_objects = [], []
+    barrier_objects = []
     if "Barriers" in bpy.data.collections:
         barrier_objects.extend(bpy.data.collections["Barriers"].objects)
-    if "Brick" in bpy.data.collections:
-        brick_objects.extend(bpy.data.collections["Brick"].objects)
     print(f"Found {len(barrier_objects)} barrier objects from source scene")
-    print(f"Found {len(brick_objects)} brick objects from source scene")
+
 
     mask = load_mask(mask_path)
     black_mask, red_mask = classify_mask(mask)

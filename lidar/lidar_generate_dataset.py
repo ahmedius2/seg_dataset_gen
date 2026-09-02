@@ -21,9 +21,8 @@ from blender_pipeline import (
     build_flight_attitudes,
     build_flight_path,
     create_lidar_scanner_object,
-    create_noisy_ground_mesh,
     create_render_camera_object,
-    render_camera_frames,
+    create_noisy_ground_mesh,
     run_blainder_scan,
 )
 from dataset_config import (
@@ -32,13 +31,14 @@ from dataset_config import (
     FLIGHT_ALT_MAX,
     FLIGHT_ALT_MIN,
     GRID_N,
+    LIDAR_SENSOR_NAME,
+    LIDAR_SENSOR_PARAMS,
     MASK_DIR,
     MASK_PX,
     NUM_SCENES,
     NUM_SCENES_TO_EXPORT_BLEND,
     OUT_DIR,
     PLANE_SIZE,
-    ROBOSENSE_E1R_PARAMS,
     SOURCE_SCENE_PATH
 )
 from mask_scene import (
@@ -118,6 +118,9 @@ def main():
             mmat.set_principled_shader_value("Roughness", 0.9)
             marker.replace_materials(mmat)
 
+        # settled_count = settle_generated_obstacles()
+        # print(f"[scene {scene_idx}] settled and froze {settled_count} generated obstacle(s)")
+
         scene_dir = os.path.join(OUT_DIR, f"scene_{scene_idx:04d}")
         os.makedirs(scene_dir, exist_ok=True)
 
@@ -133,12 +136,11 @@ def main():
         attitudes = build_flight_attitudes(len(flight_poses), per_pose_jitter=True)
 
         lidar_scanner = create_lidar_scanner_object(f"LidarScanner_scene{scene_idx}")
-        render_camera = create_render_camera_object(f"RenderCamera_scene{scene_idx}")
+        # render_camera = create_render_camera_object(f"RenderCamera_scene{scene_idx}")
         num_frames = animate_flight_path(lidar_scanner, flight_poses, attitudes)
 
-
-        render_camera_frames(render_camera, scene_dir, flight_poses, attitudes, image_dir_name="camera")
-        run_blainder_scan(lidar_scanner, scene_dir, num_frames, ROBOSENSE_E1R_PARAMS)
+        # render_camera_frames(render_camera, scene_dir, flight_poses, attitudes, image_dir_name="camera")
+        run_blainder_scan(lidar_scanner, scene_dir, num_frames, LIDAR_SENSOR_PARAMS)
 
         np.save(os.path.join(scene_dir, "occupancy_grid.npy"), occupancy_grid)
         start_gpx = int((start_px[1] / MASK_PX) * GRID_N)
@@ -174,15 +176,15 @@ def main():
             "cleared_barricade_index": scene["cleared_barricade_index"],
             "rubble_info": rubble_info,
             "barricade_info": barricade_info,
-            "sensor": "robosense_e1r",
-            "sensor_params": ROBOSENSE_E1R_PARAMS,
+            "sensor": LIDAR_SENSOR_NAME,
+            "sensor_params": LIDAR_SENSOR_PARAMS,
             "flight_poses": flight_poses,
             "attitude_jitter_deg": attitudes,
         }
         with open(os.path.join(scene_dir, "meta.json"), "w") as f:
             json.dump(meta, f, indent=2)
 
-        print(f"[scene {scene_idx}] sensor=robosense_e1r obstacles={num_obstacles} "
+        print(f"[scene {scene_idx}] sensor={LIDAR_SENSOR_NAME} obstacles={num_obstacles} "
               f"altitude={altitude:.1f}m start={start_xy} target={target_xy}")
 
 

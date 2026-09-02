@@ -19,7 +19,7 @@ from dataset_config import (
     MAX_PITCH_DEV_DEG,
     MAX_ROLL_DEV_DEG,
     MAX_YAW_JITTER_DEG,
-    NUM_FRAMES,
+    NUM_FRAMES_PER_SCENE,
 )
 
 try:
@@ -76,7 +76,7 @@ def cell_center_from_index(row, col):
     return x, y
 
 
-def build_flight_path(altitude, lane_spacing=8.0, area_size=AREA_SIZE_M, num_frames=NUM_FRAMES):
+def build_flight_path(altitude, lane_spacing=8.0, area_size=AREA_SIZE_M, num_frames=NUM_FRAMES_PER_SCENE):
     """Lawn-mower raster path resampled to exactly num_frames evenly spaced poses."""
     half = area_size / 2
     lanes = np.arange(-half + lane_spacing / 2, half, lane_spacing)
@@ -122,15 +122,8 @@ def enable_blainder_addon():
         bpy.ops.preferences.addon_enable(module=addon_name)
 
 
+#def create_render_camera_object(name="RenderCamera"):
 def create_lidar_scanner_object(name="LidarScanner"):
-    cam_data = bpy.data.cameras.new(name=f"{name}_data")
-    cam_data.lens = 35.0
-    cam_obj = bpy.data.objects.new(name, cam_data)
-    bpy.context.scene.collection.objects.link(cam_obj)
-    return cam_obj
-
-
-def create_render_camera_object(name="RenderCamera"):
     cam_data = bpy.data.cameras.new(name=f"{name}_data")
     cam_data.sensor_fit = 'HORIZONTAL'
     cam_data.angle_x = math.radians(LIDAR_FOV_X_DEG)

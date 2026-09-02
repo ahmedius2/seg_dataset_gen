@@ -1,34 +1,31 @@
-# Script usage: blenderproc run lidar_generate_dataset.py <output_dir> <num_scenes>
-
-import sys
+# Script usage: blenderproc run lidar_generate_dataset.py <output_dir>
 import os
 
-OUT_DIR = "output"
-NUM_SCENES = 10
-if len(sys.argv) >= 2:
-    OUT_DIR = sys.argv[1]
-if len(sys.argv) >= 3:
-    NUM_SCENES = int(sys.argv[2])
+# When True, only scene geometry is generated (ground, obstacles, markers,
+# optional .blend export) and the LiDAR scan / rendering step is skipped.
+SKIP_RENDER_AND_SCAN = True
 
+OUT_DIR = "output"
+NUM_SCENES_PER_MASK = 3
 os.makedirs(OUT_DIR, exist_ok=True)
 
 # Number of LiDAR frames (flight poses) to simulate per scene. The lawn-mower
 # flight path is resampled to exactly this many evenly spaced poses.
-NUM_FRAMES = 5
+NUM_FRAMES_PER_SCENE = 1
 
 # Number of Blender frames used to let active obstacles settle on the passive
 # ground before the cameras and LiDAR capture the scene.
-PHYSICS_SETTLE_FRAMES = 120
+# PHYSICS_SETTLE_FRAMES = 120
 
 # Export the first N generated scenes as .blend files (into each scene's
 # output dir) for manual inspection in Blender. Set to 0 to disable.
-NUM_SCENES_TO_EXPORT_BLEND = NUM_SCENES
+# Set to -1 to export all scenes.
+NUM_SCENES_TO_EXPORT_BLEND = -1
 
 MIN_DIST_BTW_START_TARGET = 50.0  # meters: start/target must be far apart to avoid trivial paths
 PLANE_SIZE = 300.0               # visible ground plane size in meters
 AREA_SIZE_M = 50.0               # meters: inner active region for obstacle generation and flight path
 CELL_SIZE_M = 0.5                # 0.5x0.5 m grid cells
-CELL_COUNT = int(AREA_SIZE_M / CELL_SIZE_M)
 GRID_N = int(AREA_SIZE_M / CELL_SIZE_M)
 
 # NOTE: increase amplitude and scale to make the terrain more bumpy, or decrease to make it flatter.
@@ -57,9 +54,9 @@ MAX_YAW_JITTER_DEG = 5.0    # small heading wander (usually irrelevant for nadir
 ROBOSENSE_E1R_FOV_X_DEG = 120.0
 ROBOSENSE_E1R_FOV_Y_DEG = 90.0
 ROBOSENSE_E1R_PARAMS = dict(
-    resolutionX=192,
+    resolutionX=int(ROBOSENSE_E1R_FOV_X_DEG/0.625),
     fovX=ROBOSENSE_E1R_FOV_X_DEG,
-    resolutionY=144,
+    resolutionY=int(ROBOSENSE_E1R_FOV_Y_DEG/0.625),
     fovY=ROBOSENSE_E1R_FOV_Y_DEG,
 )
 
@@ -67,12 +64,12 @@ ROBOSENSE_E1R_PARAMS = dict(
 # 20(V) deg, global angular resolution 0.08(H) x 0.1(V) deg ->
 # resX = 140/0.08 ~= 1750, resY = 20/0.1 = 200.
 # Source: shop.leodrive.ai/robosense-emx-192-kanalli-otomotiv-sinifi-yuksek-performansli-dijital-lidar-sensoru
-ROBOSENSE_EMX192_FOV_X_DEG = 140.0
+ROBOSENSE_EMX192_FOV_X_DEG = 140.0 # NOTE, ACTUAL VALUE is 140, to save time we use 50.0
 ROBOSENSE_EMX192_FOV_Y_DEG = 20.0
 ROBOSENSE_EMX192_PARAMS = dict(
-    resolutionX=1750,
+    resolutionX=int(ROBOSENSE_EMX192_FOV_X_DEG/0.08),
     fovX=ROBOSENSE_EMX192_FOV_X_DEG,
-    resolutionY=200,
+    resolutionY=int(ROBOSENSE_EMX192_FOV_Y_DEG/0.1),
     fovY=ROBOSENSE_EMX192_FOV_Y_DEG,
 )
 
@@ -84,8 +81,8 @@ LIDAR_FOV_Y_DEG = ROBOSENSE_EMX192_FOV_Y_DEG
 
 # Keep the RGB render camera geometry consistent with the active LiDAR's FOV
 # using Blender's explicit camera angle properties.
-RENDER_RES_X = 1750
-RENDER_RES_Y = 200
+RENDER_RES_X = LIDAR_SENSOR_PARAMS['resolutionX']
+RENDER_RES_Y = LIDAR_SENSOR_PARAMS['resolutionY']
 
 # ----
 # Mask-driven scene reconstruction config
@@ -117,4 +114,4 @@ BARRICADE_MIN_BLOB_PX = 1          # ignore tiny red specks
 # Start/target sampling in mask space.
 MIN_DIST_BTW_START_TARGET_PX = MIN_DIST_BTW_START_TARGET / PIX_SIZE
 
-SOURCE_SCENE_PATH = "/home/dho/work/ileri_otonom/seg_dataset_gen/bl_scenes/newscene/rubbles.blend"
+SOURCE_SCENE_PATH = "/home/dho/work/ileri_otonom/seg_dataset_gen/lidar/rubbles.blend"

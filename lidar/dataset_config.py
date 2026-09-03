@@ -101,7 +101,7 @@ RENDER_RES_Y = LIDAR_SENSOR_PARAMS['resolutionY']
 # 100x100 px bird's-eye masks describe the inner AREA_SIZE x AREA_SIZE region.
 # Black blobs = rubble piles, white = clear path, red blobs = barricades.
 
-MASK_DIR = "/home/dho/work/ileri_otonom/seg_dataset_gen/scene_masks"
+MASK_DIR = "/home/dho/work/ileri_otonom/seg_dataset_gen/lidar/scene_masks"
 MASK_PX = 100                     # mask is MASK_PX x MASK_PX pixels
 PIX_SIZE = AREA_SIZE_M / MASK_PX  # meters per mask pixel (50/100 = 0.5 m/px)
 
@@ -109,7 +109,7 @@ PIX_SIZE = AREA_SIZE_M / MASK_PX  # meters per mask pixel (50/100 = 0.5 m/px)
 # then downscale back to MASK_PX x MASK_PX so it drops into the pipeline unchanged.
 MASK_MERGE_MODE = True            # when True, generate+use merged masks instead of the raw ones
 MASK_MERGE_RANDOM_ORDER = False    # False = merge consecutive masks; True = shuffle first
-MASK_MERGE_DIR = "/home/dho/work/ileri_otonom/seg_dataset_gen/scene_masks/merged"
+MASK_MERGE_DIR = "/home/dho/work/ileri_otonom/seg_dataset_gen/lidar/scene_masks/merged"
 
 # Classification thresholds on 0..1 normalized RGB.
 BLACK_LEVEL = 0.35                # pixel is "rubble" if max(R,G,B) < BLACK_LEVEL

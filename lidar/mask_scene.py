@@ -24,6 +24,7 @@ from dataset_config import (
     RUBBLE_SURFACE_MAX_NOISE,
     MIN_DIST_BTW_START_TARGET_PX,
 )
+from scatter_objects import scatter_background_objects
 
 
 def save_occupancy_grid_preview(grid, output_path, start_px=None, target_px=None):
@@ -308,6 +309,8 @@ def build_scene_from_mask(mask_path, source_scene_path, rng=random):
         barrier_objects.extend(bpy.data.collections["Barriers"].objects)
     print(f"Found {len(barrier_objects)} barrier objects from source scene")
 
+    # Scatter buildings/cars/trees/humans/animals/other outside the inner mask area
+    scatter_info = scatter_background_objects(rng=rng)
 
     mask = load_mask(mask_path)
     black_mask, red_mask = classify_mask(mask)
@@ -352,6 +355,7 @@ def build_scene_from_mask(mask_path, source_scene_path, rng=random):
         cleared_barricade_index=cleared_barricade_index,
         occupancy_grid=occupancy_grid,
         faded=faded,
+        scatter_info=scatter_info,
     )
 
 

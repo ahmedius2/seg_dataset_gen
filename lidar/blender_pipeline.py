@@ -10,10 +10,6 @@ from mathutils import noise as bnoise
 from dataset_config import (
     AREA_SIZE_M,
     CELL_SIZE_M,
-    GROUND_NOISE_AMPLITUDE_M,
-    GROUND_NOISE_CELL_SIZE_M,
-    GROUND_NOISE_MICRO_STD_M,
-    GROUND_NOISE_SCALE,
     LIDAR_FOV_X_DEG,
     LIDAR_FOV_Y_DEG,
     MAX_PITCH_DEV_DEG,
@@ -31,10 +27,10 @@ except ImportError:
 def create_noisy_ground_mesh(
     name,
     size_m,
-    cell_size_m=GROUND_NOISE_CELL_SIZE_M,
-    amplitude_m=GROUND_NOISE_AMPLITUDE_M,
-    noise_scale=GROUND_NOISE_SCALE,
-    micro_std_m=GROUND_NOISE_MICRO_STD_M,
+    cell_size_m,
+    amplitude_m,
+    noise_scale,
+    micro_std_m,
     rng=random,
 ):
     """Build a subdivided ground plane with Perlin undulation + per-vertex jitter.

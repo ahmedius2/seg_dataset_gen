@@ -30,6 +30,9 @@ from dataset_config import (
     FLIGHT_ALT_MAX,
     FLIGHT_ALT_MIN,
     GRID_N,
+    GROUND_NOISE_CELL_SIZE_CHOICES,
+    GROUND_NOISE_VALUE_MAX,
+    GROUND_NOISE_VALUE_MIN,
     LIDAR_SENSOR_NAME,
     LIDAR_SENSOR_PARAMS,
     MASK_DIR,
@@ -38,6 +41,7 @@ from dataset_config import (
     NUM_SCENES_TO_EXPORT_BLEND,
     OUT_DIR,
     PLANE_SIZE,
+    SEED,
     SKIP_RENDER_AND_SCAN,
     SOURCE_SCENE_PATH
 )
@@ -59,9 +63,22 @@ def configure_blender_gpu():
         scene.render.engine = 'CYCLES'
 
 
+def parse_seed_arg():
+    # allow overriding the config default via `blenderproc run ... -- --seed=123`
+    for arg in sys.argv:
+        if arg.startswith("--seed="):
+            return int(arg.split("=", 1)[1])
+    return SEED
+
+
 def main():
     # allow overriding the config default via `blenderproc run ... -- --skip-render`
     skip_render_and_scan = SKIP_RENDER_AND_SCAN or "--skip-render" in sys.argv
+
+    seed = parse_seed_arg()
+    random.seed(seed)
+    np.random.seed(seed)
+    print(f"Using seed={seed} for deterministic scene generation.")
 
     bproc.init()
     configure_blender_gpu()
@@ -76,11 +93,18 @@ def main():
         )
     print(f"Found {len(mask_files)} mask(s); generating {NUM_SCENES_PER_MASK} scene(s) per mask.")
 
+    # amplitude/scale/micro-std ramp together, linearly, over the whole run
+    ground_noise_values = np.linspace(GROUND_NOISE_VALUE_MIN, GROUND_NOISE_VALUE_MAX, 10)
+
     mask_idx = 0
     for mask_path in mask_files:
       for scene_idx in range(NUM_SCENES_PER_MASK):
         bproc.clean_up()
         print(f"[scene {mask_idx} - {scene_idx}] reconstructing from mask: {mask_path}")
+
+        global_scene_idx = mask_idx * NUM_SCENES_PER_MASK + scene_idx
+        ground_noise_value = float(ground_noise_values[global_scene_idx % len(ground_noise_values)])
+        ground_noise_cell_size = GROUND_NOISE_CELL_SIZE_CHOICES[global_scene_idx % len(GROUND_NOISE_CELL_SIZE_CHOICES)]
 
         scene = build_scene_from_mask(mask_path, SOURCE_SCENE_PATH, rng=random)
 
@@ -99,29 +123,40 @@ def main():
         rubble_info = scene["rubble_info"]
         barricade_info = scene["barricade_info"]
         num_obstacles = len(rubble_info) + len(barricade_info)
+        scatter_info = scene["scatter_info"]
 
         print(f"[scene {mask_idx} - {scene_idx}] start_px={start_px} target_px={target_px} "
               f"rubble={len(rubble_info)} barricades={len(barricade_info)} "
               f"cleared_barricade={scene['cleared_barricade_index']}")
+        print(f"[scene {mask_idx} - {scene_idx}] scattered: "
+              + ", ".join(f"{name}={len(items)}" for name, items in scatter_info.items()))
 
-        base_ground = create_noisy_ground_mesh("ground_base", PLANE_SIZE, rng=random)
+        base_ground = create_noisy_ground_mesh(
+            "ground_base", PLANE_SIZE,
+            cell_size_m=ground_noise_cell_size,
+            amplitude_m=ground_noise_value,
+            noise_scale=ground_noise_value,
+            micro_std_m=ground_noise_value,
+            rng=random,
+        )
         base_ground.set_location([0.0, 0.0, -0.05])
         base_mat = bproc.material.create("ground_base_mat")
         base_mat.set_principled_shader_value("Base Color", [0.3, 0.28, 0.25, 1.0])
         base_mat.set_principled_shader_value("Roughness", 0.9)
         base_ground.replace_materials(base_mat)
 
-        for label, (wx, wy), color in [
-            ("start_cell", start_xy, [0.15, 0.8, 0.25, 1.0]),
-            ("target_cell", target_xy, [0.9, 0.18, 0.18, 1.0]),
-        ]:
-            marker = bproc.object.create_primitive("PLANE")
-            marker.set_name(label)
-            marker.set_location([wx, wy, 0.01])
-            mmat = bproc.material.create(f"{label}_mat_{mask_idx}")
-            mmat.set_principled_shader_value("Base Color", color)
-            mmat.set_principled_shader_value("Roughness", 0.9)
-            marker.replace_materials(mmat)
+        # dont' place a start/target marker in the scene for now.
+        # for label, (wx, wy), color in [
+        #     ("start_cell", start_xy, [0.15, 0.8, 0.25, 1.0]),
+        #     ("target_cell", target_xy, [0.9, 0.18, 0.18, 1.0]),
+        # ]:
+        #     marker = bproc.object.create_primitive("PLANE")
+        #     marker.set_name(label)
+        #     marker.set_location([wx, wy, 0.01])
+        #     mmat = bproc.material.create(f"{label}_mat_{mask_idx}")
+        #     mmat.set_principled_shader_value("Base Color", color)
+        #     mmat.set_principled_shader_value("Roughness", 0.9)
+        #     marker.replace_materials(mmat)
 
         if skip_render_and_scan:
             print(f"[scene {mask_idx} - {scene_idx}] skipping render/scan (SKIP_RENDER_AND_SCAN enabled)")
@@ -163,11 +198,14 @@ def main():
             )
 
             meta = {
+                "seed": seed,
                 "plane_size": PLANE_SIZE,
                 "area_size": AREA_SIZE_M,
                 "cell_size": CELL_SIZE_M,
                 "cell_count": int(AREA_SIZE_M / CELL_SIZE_M),
                 "grid_n": GRID_N,
+                "ground_noise_cell_size": ground_noise_cell_size,
+                "ground_noise_value": ground_noise_value,
                 "altitude": altitude,
                 "mask_path": mask_path,
                 "mask_px": MASK_PX,
@@ -182,6 +220,7 @@ def main():
                 "cleared_barricade_index": scene["cleared_barricade_index"],
                 "rubble_info": rubble_info,
                 "barricade_info": barricade_info,
+                "scatter_info": scatter_info,
                 "sensor": LIDAR_SENSOR_NAME,
                 "sensor_params": LIDAR_SENSOR_PARAMS,
                 "flight_poses": flight_poses,

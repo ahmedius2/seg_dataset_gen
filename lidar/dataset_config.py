@@ -5,8 +5,18 @@ import os
 # optional .blend export) and the LiDAR scan / rendering step is skipped.
 SKIP_RENDER_AND_SCAN = True
 
+# Export the first N generated scenes as .blend files (into each scene's
+# output dir) for manual inspection in Blender. Set to 0 to disable.
+# Set to -1 to export all scenes.
+NUM_SCENES_TO_EXPORT_BLEND = -1
+
+# Seed for Python's `random` module (and numpy) so that a given seed always
+# reproduces the same masks, obstacle layouts, ground noise, and flight jitter.
+# Override via `blenderproc run ... -- --seed=N`.
+SEED = 42
+
 OUT_DIR = "output"
-NUM_SCENES_PER_MASK = 3
+NUM_SCENES_PER_MASK = 6
 os.makedirs(OUT_DIR, exist_ok=True)
 
 # Number of LiDAR frames (flight poses) to simulate per scene. The lawn-mower
@@ -17,13 +27,9 @@ NUM_FRAMES_PER_SCENE = 1
 # ground before the cameras and LiDAR capture the scene.
 # PHYSICS_SETTLE_FRAMES = 120
 
-# Export the first N generated scenes as .blend files (into each scene's
-# output dir) for manual inspection in Blender. Set to 0 to disable.
-# Set to -1 to export all scenes.
-NUM_SCENES_TO_EXPORT_BLEND = -1
 
 MIN_DIST_BTW_START_TARGET = 50.0  # meters: start/target must be far apart to avoid trivial paths
-PLANE_SIZE = 300.0               # visible ground plane size in meters
+PLANE_SIZE = 200.0               # visible ground plane size in meters
 AREA_SIZE_M = 50.0               # meters: inner active region for obstacle generation and flight path
 CELL_SIZE_M = 0.5                # 0.5x0.5 m grid cells
 GRID_N = int(AREA_SIZE_M / CELL_SIZE_M)
@@ -33,10 +39,15 @@ GRID_N = int(AREA_SIZE_M / CELL_SIZE_M)
 # Ground plane surface roughness: a subdivided grid perturbed with low-frequency
 # Perlin noise (macro undulation) plus small per-vertex jitter (micro roughness),
 # so the base terrain is no longer perfectly flat.
-GROUND_NOISE_CELL_SIZE_M = 0.2    # meters per grid subdivision (smaller = more detail, more geometry)
-GROUND_NOISE_AMPLITUDE_M = 0.05    # meters, max height of the low-frequency undulation
-GROUND_NOISE_SCALE = 0.1         # Perlin noise frequency (per meter); smaller = broader bumps
-GROUND_NOISE_MICRO_STD_M = 0.05   # meters, Gaussian per-vertex jitter (fine-grained roughness)
+# Cell size is randomly chosen per scene from this set (meters per grid subdivision).
+GROUND_NOISE_CELL_SIZE_CHOICES = [0.5, 1.0, 2.0]
+
+# Amplitude, Perlin noise scale, and micro-jitter std all share one value per
+# scene, linearly interpolated across the full run from MIN to MAX (step size
+# is 1 / total_scenes, so the last scene lands on MAX).
+GROUND_NOISE_VALUE_MIN = 0.01     # meters
+GROUND_NOISE_VALUE_MAX = 0.15     # meters
+
 
 FLIGHT_ALT_MIN = 30.0
 FLIGHT_ALT_MAX = 40.0
@@ -102,8 +113,8 @@ RED_OTHER_MAX = 0.35              # ... while G and B are low
 # Rubble elevation. Per-blob peak height is drawn uniformly in this range.
 RUBBLE_MAX_HEIGHT_MIN = 1.0        # meters (configurable)
 RUBBLE_MAX_HEIGHT_MAX = 5.0        # meters (configurable)
-RUBBLE_SURFACE_MIN_NOISE = 0.05        # meters, per-vertex Gaussian roughness of rubble
-RUBBLE_SURFACE_MAX_NOISE = 0.30        # meters, per-vertex Gaussian roughness of rubble
+RUBBLE_SURFACE_MIN_NOISE = 0.0        # meters, per-vertex Gaussian roughness of rubble
+RUBBLE_SURFACE_MAX_NOISE = 0.5        # meters, per-vertex Gaussian roughness of rubble
 
 RUBBLE_MIN_BLOB_PX = 3             # ignore tiny specks smaller than this many px
 
@@ -115,3 +126,35 @@ BARRICADE_MIN_BLOB_PX = 1          # ignore tiny red specks
 MIN_DIST_BTW_START_TARGET_PX = MIN_DIST_BTW_START_TARGET / PIX_SIZE
 
 SOURCE_SCENE_PATH = "/home/dho/work/ileri_otonom/seg_dataset_gen/lidar/rubbles.blend"
+
+# ----
+# Background scattering (Buildings/Cars/Trees/Humans/Animals/Other)
+# ----
+# Objects from these source collections are copied and spread with Poisson-disk
+# style placement over the outer PLANE_SIZE area, keeping the inner
+# AREA_SIZE_M x AREA_SIZE_M mask-driven region clear. Placement order matters:
+# buildings first, then cars, then trees, humans, animals, and finally other.
+# Density N means N x the source collection's object count is placed:
+# e.g. 1.5 -> the full collection plus its first half copied again.
+BUILDING_DENSITY = 1.0
+CAR_DENSITY = 1.0
+TREE_DENSITY = 0.0
+HUMAN_DENSITY = 4.0
+ANIMAL_DENSITY = 0.5
+OTHER_DENSITY = 1.0
+
+SCATTER_MARGIN_M = 1.0       # meters, extra gap enforced between scattered object footprints
+SCATTER_MAX_ATTEMPTS = 200   # rejection-sampling attempts per object before giving up
+
+
+# list of object collections in the rubbles scene:
+"""
+Barriers
+Humans
+Cars
+Buildings
+Trees
+Other
+Animals
+Grass
+"""

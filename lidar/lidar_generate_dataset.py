@@ -36,6 +36,8 @@ from dataset_config import (
     LIDAR_SENSOR_NAME,
     LIDAR_SENSOR_PARAMS,
     MASK_DIR,
+    MASK_MERGE_DIR,
+    MASK_MERGE_MODE,
     MASK_PX,
     NUM_SCENES_PER_MASK,
     NUM_SCENES_TO_EXPORT_BLEND,
@@ -46,6 +48,7 @@ from dataset_config import (
     SOURCE_SCENE_PATH
 )
 from mask_scene import (
+    build_merged_masks,
     build_scene_from_mask,
     list_mask_files,
     save_occupancy_grid_preview,
@@ -91,6 +94,9 @@ def main():
             f"No mask images found in '{MASK_DIR}'. Add {MASK_PX}x{MASK_PX} PNG masks "
             f"(black=rubble, red=barricade, white=clear) to that directory."
         )
+    if MASK_MERGE_MODE:
+        # Keep the original masks in play alongside the merged ones.
+        mask_files = mask_files + build_merged_masks(mask_files, MASK_MERGE_DIR, rng=random)
     print(f"Found {len(mask_files)} mask(s); generating {NUM_SCENES_PER_MASK} scene(s) per mask.")
 
     # amplitude/scale/micro-std ramp together, linearly, over the whole run

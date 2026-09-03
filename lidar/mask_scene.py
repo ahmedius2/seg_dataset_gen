@@ -11,17 +11,24 @@ from dataset_config import (
     BARRICADE_HEIGHT,
     BARRICADE_MIN_BLOB_PX,
     BLACK_LEVEL,
+    CLEARED_BARRICADE_FRACTION,
     GRID_N,
     MASK_DIR,
+    MASK_MERGE_RANDOM_ORDER,
     MASK_PX,
     PIX_SIZE,
     RED_MIN,
     RED_OTHER_MAX,
+    RUBBLE_EDGE_BARRICADE_MAX,
+    RUBBLE_EDGE_BARRICADE_MIN,
+    RUBBLE_EDGE_BARRICADE_OFFSET_M,
+    RUBBLE_EDGE_BARRICADES_ENABLED,
     RUBBLE_MAX_HEIGHT_MAX,
     RUBBLE_MAX_HEIGHT_MIN,
     RUBBLE_MIN_BLOB_PX,
     RUBBLE_SURFACE_MIN_NOISE,
     RUBBLE_SURFACE_MAX_NOISE,
+    RUBBLE_WALL_PROBABILITY,
     MIN_DIST_BTW_START_TARGET_PX,
 )
 from scatter_objects import scatter_background_objects
@@ -118,9 +125,13 @@ def gaussian_fade_blob(mask, black_mask):
     return faded, blobs
 
 
-def build_rubble_mesh(blob, faded, idx, rng=random):
+def build_rubble_mesh(blob, faded, idx, rng=random, barrier_objects=None):
     """Build a single rubble pile mesh from the faded blob data."""
     max_h = rng.uniform(RUBBLE_MAX_HEIGHT_MIN, RUBBLE_MAX_HEIGHT_MAX)
+    # One surface-roughness std per rubble pile; per-vertex jitter is drawn from it below.
+    surface_noise_std = rng.uniform(RUBBLE_SURFACE_MIN_NOISE, RUBBLE_SURFACE_MAX_NOISE)
+    # A minority of piles become flat-topped walls (vertical sides, no dome curvature).
+    is_wall = rng.random() < RUBBLE_WALL_PROBABILITY
 
     xs, ys = blob["xs"], blob["ys"]
     occ = {(int(c), int(r)) for c, r in zip(xs, ys)}
@@ -145,12 +156,15 @@ def build_rubble_mesh(blob, faded, idx, rng=random):
 
         h = 0.0
         if not is_boundary:
-            for dc, dr in neighbor_cells:
-                pc, pr = gx + dc, gy + dr
-                sel = (xs == pc) & (ys == pr)
-                if sel.any():
-                    h = max(h, float(faded[pr, pc]) * max_h)
-            h += rng.gauss(0.0, rng.uniform(RUBBLE_SURFACE_MIN_NOISE, RUBBLE_SURFACE_MAX_NOISE))
+            if is_wall:
+                h = max_h
+            else:
+                for dc, dr in neighbor_cells:
+                    pc, pr = gx + dc, gy + dr
+                    sel = (xs == pc) & (ys == pr)
+                    if sel.any():
+                        h = max(h, float(faded[pr, pc]) * max_h)
+            h += rng.gauss(0.0, surface_noise_std)
             h = max(h, 0.0)
         vindex[key] = len(verts)
         verts.append([wx, wy, h])
@@ -179,8 +193,64 @@ def build_rubble_mesh(blob, faded, idx, rng=random):
     obj.data.materials.append(mat)
 
     cx_world, cy_world = mask_px_to_world(blob["cx"], blob["cy"])
+    edge_barricades = build_rubble_edge_barricades(occ, verts, idx, barrier_objects, rng=rng)
     return dict(idx=idx, max_height=max_h, center_world=[cx_world, cy_world],
-                num_pixels=int(len(xs)))
+                num_pixels=int(len(xs)), edge_barricades=edge_barricades, is_wall=is_wall)
+
+
+def rubble_boundary_cells(occ):
+    """Return blob cells (col, row) that have at least one 4-connected neighbor outside the blob."""
+    boundary = []
+    for col, row in occ:
+        neighbors = [(col - 1, row), (col + 1, row), (col, row - 1), (col, row + 1)]
+        if any(n not in occ for n in neighbors):
+            boundary.append((col, row))
+    return boundary
+
+
+def build_rubble_edge_barricades(occ, verts, idx, barrier_objects, rng=random):
+    """Place a handful of barrier copies along a rubble pile's boundary, each
+    facing the nearest vertex of the targeted rubble (rotated around Z only)."""
+    if not barrier_objects:
+        return []
+    if not RUBBLE_EDGE_BARRICADES_ENABLED:
+        return []
+    boundary_cells = rubble_boundary_cells(occ)
+    if not boundary_cells:
+        return []
+
+    verts_xy = np.array([[v[0], v[1]] for v in verts], dtype=np.float32)
+
+    num_barricades = min(rng.randint(RUBBLE_EDGE_BARRICADE_MIN, RUBBLE_EDGE_BARRICADE_MAX),
+                         len(boundary_cells))
+    chosen_cells = rng.sample(boundary_cells, num_barricades)
+
+    placed = []
+    for i, (col, row) in enumerate(chosen_cells):
+        wx, wy = mask_px_to_world(col, row)
+        dists = (verts_xy[:, 0] - wx) ** 2 + (verts_xy[:, 1] - wy) ** 2
+        tx, ty = verts_xy[int(np.argmin(dists))]
+
+        # Push the barricade outward from the pile's edge, away from the rubble.
+        dx, dy = wx - tx, wy - ty
+        dist = math.hypot(dx, dy)
+        if dist < 1e-6:
+            dx, dy, dist = 1.0, 0.0, 1.0
+        ox = wx + (dx / dist) * RUBBLE_EDGE_BARRICADE_OFFSET_M
+        oy = wy + (dy / dist) * RUBBLE_EDGE_BARRICADE_OFFSET_M
+
+        barrier = rng.choice(barrier_objects)
+        obj_data = barrier.data.copy()
+        obj = bpy.data.objects.new(f"rubble_barricade_{idx}_{i}", obj_data)
+        bpy.context.scene.collection.objects.link(obj)
+        obj.location = [ox, oy, -0.05]
+        # Barrier's local Y axis is treated as its facing direction; rotate
+        # (around Z only) so it points back at the rubble.
+        angle_to_target = math.atan2(ty - oy, tx - ox)
+        obj.rotation_euler = [0.0, 0.0, angle_to_target - math.pi / 2]
+        obj.scale = [1.0, 1.0, 1.0]
+        placed.append(dict(idx=i, barrier_name=barrier.name, location_world=[ox, oy]))
+    return placed
 
 
 
@@ -317,10 +387,14 @@ def build_scene_from_mask(mask_path, source_scene_path, rng=random):
 
     red_blobs = get_red_blobs(red_mask)
     cleared_red_pixels = set()
-    cleared_barricade_index = None
+    cleared_barricade_indices = []
     if red_blobs:
-        cleared_barricade_index = rng.randrange(len(red_blobs))
-        cleared_red_pixels = set(red_blobs[cleared_barricade_index])
+        num_cleared = min(len(red_blobs),
+                           max(1, math.ceil(len(red_blobs) * CLEARED_BARRICADE_FRACTION)))
+        cleared_barricade_indices = rng.sample(range(len(red_blobs)), num_cleared)
+        for cleared_idx in cleared_barricade_indices:
+            cleared_red_pixels.update(red_blobs[cleared_idx])
+    cleared_barricade_indices = set(cleared_barricade_indices)
 
     start_px, target_px = sample_start_target_free_px(
         black_mask, red_mask, MIN_DIST_BTW_START_TARGET_PX,
@@ -329,11 +403,11 @@ def build_scene_from_mask(mask_path, source_scene_path, rng=random):
     faded, fade_blobs = gaussian_fade_blob(mask, black_mask)
     rubble_info = []
     for i, blob in enumerate(fade_blobs):
-        rubble_info.append(build_rubble_mesh(blob, faded, i, rng=rng))
+        rubble_info.append(build_rubble_mesh(blob, faded, i, rng=rng, barrier_objects=barrier_objects))
 
     barricade_info = []
     for i, blob in enumerate(red_blobs):
-        if i == cleared_barricade_index:
+        if i in cleared_barricade_indices:
             continue
         #choose a random baricade index from the available barrier objects to use for this barricade
         barrier = rng.choice(barrier_objects) if barrier_objects else None
@@ -352,7 +426,7 @@ def build_scene_from_mask(mask_path, source_scene_path, rng=random):
         target_world=target_world,
         rubble_info=rubble_info,
         barricade_info=barricade_info,
-        cleared_barricade_index=cleared_barricade_index,
+        cleared_barricade_index=sorted(cleared_barricade_indices),
         occupancy_grid=occupancy_grid,
         faded=faded,
         scatter_info=scatter_info,
@@ -366,3 +440,37 @@ def list_mask_files(mask_dir=MASK_DIR):
     files = [f for f in os.listdir(mask_dir)
              if f.lower().endswith((".png", ".jpg", ".jpeg"))]
     return [os.path.join(mask_dir, f) for f in sorted(files)]
+
+
+def build_merged_masks(mask_files, output_dir, random_order=MASK_MERGE_RANDOM_ORDER, rng=random):
+    """Tile every 4 masks into a 2x2, (2*MASK_PX)x(2*MASK_PX) canvas, then
+    nearest-neighbor downsample back to MASK_PX x MASK_PX so the result drops
+    into the rest of the pipeline like any other mask file. Groups are
+    consecutive by default, or drawn from a shuffled order if `random_order`.
+    Saves each merged mask as a PNG in `output_dir` and returns their paths.
+    """
+    if not mask_files:
+        return []
+    order = list(mask_files)
+    if random_order:
+        rng.shuffle(order)
+
+    os.makedirs(output_dir, exist_ok=True)
+    tile_positions = [(0, 0), (0, MASK_PX), (MASK_PX, 0), (MASK_PX, MASK_PX)]
+    num_groups = math.ceil(len(order) / 4)
+
+    merged_paths = []
+    for g in range(num_groups):
+        group = [order[(g * 4 + k) % len(order)] for k in range(4)]
+        canvas = np.zeros((MASK_PX * 2, MASK_PX * 2, 3), dtype=np.float32)
+        for (row_off, col_off), path in zip(tile_positions, group):
+            canvas[row_off:row_off + MASK_PX, col_off:col_off + MASK_PX, :] = load_mask(path)
+        # Stride-2 (nearest-neighbor) downsample keeps colors pure instead of blending them.
+        merged = canvas[0::2, 0::2, :]
+        out_path = os.path.join(output_dir, f"merged_{g:04d}.png")
+        plt.imsave(out_path, merged)
+        merged_paths.append(out_path)
+
+    print(f"[mask-merge] built {len(merged_paths)} merged mask(s) from {len(order)} "
+          f"source mask(s) (random_order={random_order})")
+    return merged_paths

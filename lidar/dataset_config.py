@@ -16,7 +16,7 @@ NUM_SCENES_TO_EXPORT_BLEND = -1
 SEED = 42
 
 OUT_DIR = "output"
-NUM_SCENES_PER_MASK = 6
+NUM_SCENES_PER_MASK = 2
 os.makedirs(OUT_DIR, exist_ok=True)
 
 # Number of LiDAR frames (flight poses) to simulate per scene. The lawn-mower
@@ -105,6 +105,12 @@ MASK_DIR = "/home/dho/work/ileri_otonom/seg_dataset_gen/scene_masks"
 MASK_PX = 100                     # mask is MASK_PX x MASK_PX pixels
 PIX_SIZE = AREA_SIZE_M / MASK_PX  # meters per mask pixel (50/100 = 0.5 m/px)
 
+# Mask merging: combine every 4 masks into a 2x2, (2*MASK_PX)x(2*MASK_PX) tile,
+# then downscale back to MASK_PX x MASK_PX so it drops into the pipeline unchanged.
+MASK_MERGE_MODE = True            # when True, generate+use merged masks instead of the raw ones
+MASK_MERGE_RANDOM_ORDER = False    # False = merge consecutive masks; True = shuffle first
+MASK_MERGE_DIR = "/home/dho/work/ileri_otonom/seg_dataset_gen/scene_masks/merged"
+
 # Classification thresholds on 0..1 normalized RGB.
 BLACK_LEVEL = 0.35                # pixel is "rubble" if max(R,G,B) < BLACK_LEVEL
 RED_MIN = 0.5                     # red barricade: R high ...
@@ -116,11 +122,26 @@ RUBBLE_MAX_HEIGHT_MAX = 5.0        # meters (configurable)
 RUBBLE_SURFACE_MIN_NOISE = 0.0        # meters, per-vertex Gaussian roughness of rubble
 RUBBLE_SURFACE_MAX_NOISE = 0.5        # meters, per-vertex Gaussian roughness of rubble
 
+# Probability that a rubble pile is a flat-topped elevated wall (vertical
+# sides, no dome-like curvature) instead of the usual Gaussian-faded mound.
+RUBBLE_WALL_PROBABILITY = 0.2
+
 RUBBLE_MIN_BLOB_PX = 3             # ignore tiny specks smaller than this many px
+
+# Small barricades scattered along each rubble pile's boundary, facing inward.
+RUBBLE_EDGE_BARRICADES_ENABLED = False  # set False to disable placing these entirely
+RUBBLE_EDGE_BARRICADE_MIN = 0      # min number placed per rubble pile
+RUBBLE_EDGE_BARRICADE_MAX = 2      # max number placed per rubble pile
+RUBBLE_EDGE_BARRICADE_OFFSET_M = 0.5  # meters, pushed outward from the pile's edge
 
 # Barricade geometry (oriented box aligned to each red blob's major axis).
 BARRICADE_HEIGHT = 1               # meters tall
 BARRICADE_MIN_BLOB_PX = 1          # ignore tiny red specks
+
+# Regardless of how many red (barricade) blobs a mask has, at least this
+# fraction of them are cleared into an open path; the rest stay blocked.
+# Which blobs are cleared is chosen randomly per scene.
+CLEARED_BARRICADE_FRACTION = 0.33
 
 # Start/target sampling in mask space.
 MIN_DIST_BTW_START_TARGET_PX = MIN_DIST_BTW_START_TARGET / PIX_SIZE
@@ -142,6 +163,7 @@ TREE_DENSITY = 0.0
 HUMAN_DENSITY = 4.0
 ANIMAL_DENSITY = 0.5
 OTHER_DENSITY = 1.0
+DEBRIS_DENSITY = 1.0
 
 SCATTER_MARGIN_M = 1.0       # meters, extra gap enforced between scattered object footprints
 SCATTER_MAX_ATTEMPTS = 200   # rejection-sampling attempts per object before giving up
@@ -156,5 +178,6 @@ Buildings
 Trees
 Other
 Animals
+Debris
 Grass
 """

@@ -1,6 +1,6 @@
 """Scatter background decoration objects over the outer scene area.
 
-Copies objects from the source scene's Buildings/Cars/Trees/Humans/Animals/Other
+Copies objects from the source scene's Buildings/Cars/Trees/Humans/Animals/Other/Debris
 collections and spreads them across the PLANE_SIZE area using Poisson-disk-style
 rejection sampling, keeping the inner AREA_SIZE_M mask-driven region clear and
 avoiding collisions between all placed footprints.
@@ -16,6 +16,7 @@ from dataset_config import (
     ANIMAL_DENSITY,
     BUILDING_DENSITY,
     CAR_DENSITY,
+    DEBRIS_DENSITY,
     HUMAN_DENSITY,
     OTHER_DENSITY,
     PLANE_SIZE,
@@ -24,9 +25,10 @@ from dataset_config import (
     TREE_DENSITY,
 )
 
-# Fixed placement order: buildings, then cars, then trees, humans, animals, other.
+# Fixed placement order: buildings, then cars, then trees, humans, animals, other, debris.
 SCATTER_COLLECTIONS = [
     ("Buildings", BUILDING_DENSITY),
+    ("Debris", DEBRIS_DENSITY),
     ("Cars", CAR_DENSITY),
     ("Trees", TREE_DENSITY),
     ("Humans", HUMAN_DENSITY),

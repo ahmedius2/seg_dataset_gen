@@ -29,7 +29,7 @@ NUM_FRAMES_PER_SCENE = 1
 
 
 MIN_DIST_BTW_START_TARGET = 50.0  # meters: start/target must be far apart to avoid trivial paths
-PLANE_SIZE = 200.0               # visible ground plane size in meters
+PLANE_SIZE = 300.0               # visible ground plane size in meters
 AREA_SIZE_M = 50.0               # meters: inner active region for obstacle generation and flight path
 CELL_SIZE_M = 0.5                # 0.5x0.5 m grid cells
 GRID_N = int(AREA_SIZE_M / CELL_SIZE_M)

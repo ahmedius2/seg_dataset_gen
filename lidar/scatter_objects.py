@@ -118,5 +118,5 @@ def scatter_background_objects(rng=random):
     scatter_info = {}
     for collection_name, density in SCATTER_COLLECTIONS:
         scatter_info[collection_name.lower()] = scatter_collection(
-            collection_name, density, placements, rng=rng, plane_size=PLANE_SIZE - 100.0)
+            collection_name, density, placements, rng=rng, plane_size=PLANE_SIZE - 150.0)
     return scatter_info

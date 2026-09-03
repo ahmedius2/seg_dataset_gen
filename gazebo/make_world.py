@@ -90,7 +90,7 @@ def parse_args():
 
 def main():
     args = parse_args()
-    spawn_x, spawn_y = 0.0, 0.0
+    spawn_x, spawn_y = 125.0, 0.0 # somewhere that is ground
     if args.meta:
         with open(args.meta) as f:
             meta = json.load(f)

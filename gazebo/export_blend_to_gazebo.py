@@ -11,19 +11,23 @@ built-in glTF exporter, e.g.:
 
 Produces <out>/model.config, <out>/model.sdf, <out>/meshes/ground.<ext> and
 <out>/meshes/obstacles.<ext>, ready to be referenced from a world file as
-`model://<name>`. The `ground_base` mesh gets a cheap box collider sized to
-its bounding box (instead of a per-triangle mesh collider); every other mesh
-(rubble, barricades, scattered props) is exported as a visual-only obstacle
-with no collider. Pass --format glb (default) or --format dae; glb (binary)
-parses much faster in gz-sim than the verbose XML dae format once a scene
-has more than a handful of objects.
+`model://<name>`. The `ground_base` mesh gets a cheap flat box collider sized
+to PLANE_SIZE x PLANE_SIZE (instead of a per-triangle mesh collider); every
+other mesh (rubble, barricades, scattered props) is exported as a
+visual-only obstacle with no collider. Pass --format glb (default) or
+--format dae; glb (binary) parses much faster in gz-sim than the verbose XML
+dae format once a scene has more than a handful of objects.
 """
 import argparse
 import os
 import sys
 
 import bpy
-import mathutils
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lidar"))
+from dataset_config import PLANE_SIZE  # noqa: E402
+
+GROUND_COLLIDER_HEIGHT = 0.2
 
 MODEL_CONFIG_TEMPLATE = """<?xml version="1.0"?>
 <model>
@@ -106,19 +110,6 @@ def merge_into_one_object(objs, name):
     return [merged]
 
 
-def world_bounding_box(objs):
-    """Combined axis-aligned world-space bounding box (min, max) of objs."""
-    mins = [float("inf")] * 3
-    maxs = [float("-inf")] * 3
-    for obj in objs:
-        for corner in obj.bound_box:
-            world_corner = obj.matrix_world @ mathutils.Vector(corner)
-            for i in range(3):
-                mins[i] = min(mins[i], world_corner[i])
-                maxs[i] = max(maxs[i], world_corner[i])
-    return mins, maxs
-
-
 def main():
     args = parse_args()
     model_dir = args.out
@@ -140,14 +131,10 @@ def main():
     ground_path = os.path.join(meshes_dir, f"ground.{ext}")
     export_selected(ground_objs, ground_path, ext)
 
-    box_min, box_max = world_bounding_box(ground_objs)
-    box_center = [(box_min[i] + box_max[i]) / 2.0 for i in range(3)]
-    box_size = [max(box_max[i] - box_min[i], 0.01) for i in range(3)]
-
     sdf = MODEL_SDF_HEADER.format(
         name=args.name, ext=ext,
-        box_cx=box_center[0], box_cy=box_center[1], box_cz=box_center[2],
-        box_sx=box_size[0], box_sy=box_size[1], box_sz=box_size[2],
+        box_cx=0.0, box_cy=0.0, box_cz=0.0,
+        box_sx=PLANE_SIZE, box_sy=PLANE_SIZE, box_sz=GROUND_COLLIDER_HEIGHT,
     )
     if obstacle_objs:
         obstacles_path = os.path.join(meshes_dir, f"obstacles.{ext}")

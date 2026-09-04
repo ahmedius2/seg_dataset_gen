@@ -62,6 +62,12 @@ def create_noisy_ground_mesh(
     blender_obj.select_set(True)
     bpy.ops.rigidbody.object_add()
     blender_obj.rigid_body.type = 'PASSIVE'
+
+    # Add Solidify modifier
+    solidify_mod = blender_obj.modifiers.new(name="Solidify", type='SOLIDIFY')
+    solidify_mod.thickness = 0.005  # Set thickness in meters (e.g., 5mm)
+    bpy.ops.object.modifier_apply(modifier=solidify_mod.name)
+
     blender_obj.select_set(False)
     return bproc.types.MeshObject(blender_obj)
 

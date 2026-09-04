@@ -55,6 +55,7 @@ from mask_scene import (
 )
 
 
+
 def configure_blender_gpu():
     """Use the Blender Cycles GPU if available, mirroring the original script."""
     cycles_preferences = bpy.context.preferences.addons['cycles'].preferences
@@ -178,7 +179,6 @@ def main():
 
             # settled_count = settle_generated_obstacles()
             # print(f"[scene {scene_idx}] settled and froze {settled_count} generated obstacle(s)")
-
 
         if NUM_SCENES_TO_EXPORT_BLEND == -1 or (NUM_SCENES_TO_EXPORT_BLEND > 0 and mask_idx < NUM_SCENES_TO_EXPORT_BLEND):
             blend_path = os.path.join(scenes_dir, f"scene_{mask_idx:04d}_{scene_idx}.blend")

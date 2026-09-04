@@ -31,8 +31,10 @@ from dataset_config import (
     RUBBLE_WALL_PROBABILITY,
     MIN_DIST_BTW_START_TARGET_PX,
 )
+
 from scatter_objects import scatter_background_objects
 
+from utils import set_origin_to_center_bottom_safe
 
 def save_occupancy_grid_preview(grid, output_path, start_px=None, target_px=None):
     """Save a quick visualization for the ground-truth occupancy grid."""
@@ -183,6 +185,8 @@ def build_rubble_mesh(blob, faded, idx, rng=random, barrier_objects=None):
     mesh.update()
     obj = bpy.data.objects.new(f"rubble_{idx}", mesh)
     bpy.context.scene.collection.objects.link(obj)
+    bpy.context.view_layer.objects.active = obj
+    obj.select_set(True)
 
     material_name = "Gray"
     # Get the material or create it if it doesn't exist
@@ -196,6 +200,13 @@ def build_rubble_mesh(blob, faded, idx, rng=random, barrier_objects=None):
             bsdf.inputs["Roughness"].default_value = 0.95
 
     obj.data.materials.append(mat)
+
+    # Add Solidify modifier
+    solidify_mod = obj.modifiers.new(name="Solidify", type='SOLIDIFY')
+    solidify_mod.thickness = 0.005  # Set thickness in meters (e.g., 5mm)
+    bpy.ops.object.modifier_apply(modifier=solidify_mod.name)
+
+    set_origin_to_center_bottom_safe(obj)
 
     cx_world, cy_world = mask_px_to_world(blob["cx"], blob["cy"])
     edge_barricades = build_rubble_edge_barricades(occ, verts, idx, barrier_objects, rng=rng)

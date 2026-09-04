@@ -146,10 +146,16 @@ def main():
             rng=random,
         )
         base_ground.set_location([0.0, 0.0, -0.05])
-        base_mat = bproc.material.create("ground_base_mat")
-        base_mat.set_principled_shader_value("Base Color", [0.3, 0.28, 0.25, 1.0])
-        base_mat.set_principled_shader_value("Roughness", 0.9)
-        base_ground.replace_materials(base_mat)
+
+        # Use the material named coast_sand_01 already available in the source scene.
+        coast_sand_mat_bpy = bpy.data.materials.get("coast_sand_01")
+        if coast_sand_mat_bpy:
+            base_ground.replace_materials(bproc.types.Material(coast_sand_mat_bpy))
+        else:
+            base_mat = bproc.material.create("ground_base_mat")
+            base_mat.set_principled_shader_value("Base Color", [0.3, 0.28, 0.25, 1.0])
+            base_mat.set_principled_shader_value("Roughness", 0.9)
+            base_ground.replace_materials(base_mat)
 
         # dont' place a start/target marker in the scene for now.
         # for label, (wx, wy), color in [

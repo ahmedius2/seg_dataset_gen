@@ -159,12 +159,13 @@ SOURCE_SCENE_PATH = "/home/dho/work/ileri_otonom/seg_dataset_gen/lidar/rubbles.b
 # e.g. 1.5 -> the full collection plus its first half copied again.
 BUILDING_DENSITY = 1.0
 CAR_DENSITY = 1.0
-TREE_DENSITY = 0.0
-HUMAN_DENSITY = 4.0
-ANIMAL_DENSITY = 0.5
+TREE_DENSITY = 1.0
+HUMAN_DENSITY = 5.0
+ANIMAL_DENSITY = 1.0
 OTHER_DENSITY = 1.0
-DEBRIS_DENSITY = 1.0
+DEBRIS_DENSITY = 2.0
 
+SCATTER_AREA_M = 150.0       # meters, area where objects are scattered
 SCATTER_MARGIN_M = 1.0       # meters, extra gap enforced between scattered object footprints
 SCATTER_MAX_ATTEMPTS = 200   # rejection-sampling attempts per object before giving up
 

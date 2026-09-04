@@ -39,7 +39,6 @@ def create_noisy_ground_mesh(
     (and scans) more realistically.
     """
 
-
     segments = max(2, int(round(size_m / cell_size_m)))
     bm = bmesh.new()
     bmesh.ops.create_grid(bm, x_segments=segments, y_segments=segments, size=size_m / 2.0)

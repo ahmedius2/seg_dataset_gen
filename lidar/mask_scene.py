@@ -184,12 +184,17 @@ def build_rubble_mesh(blob, faded, idx, rng=random, barrier_objects=None):
     obj = bpy.data.objects.new(f"rubble_{idx}", mesh)
     bpy.context.scene.collection.objects.link(obj)
 
-    mat = bpy.data.materials.new(f"rubble_mat_{idx}")
-    mat.use_nodes = True
-    bsdf = mat.node_tree.nodes.get("Principled BSDF")
-    if bsdf is not None:
-        bsdf.inputs["Base Color"].default_value = (0.32, 0.30, 0.28, 1.0)
-        bsdf.inputs["Roughness"].default_value = 0.95
+    material_name = "Gray"
+    # Get the material or create it if it doesn't exist
+    mat = bpy.data.materials.get(material_name)
+    if not mat:
+        mat = bpy.data.materials.new(f"rubble_mat_{idx}")
+        mat.use_nodes = True
+        bsdf = mat.node_tree.nodes.get("Principled BSDF")
+        if bsdf is not None:
+            bsdf.inputs["Base Color"].default_value = (0.32, 0.30, 0.28, 1.0)
+            bsdf.inputs["Roughness"].default_value = 0.95
+
     obj.data.materials.append(mat)
 
     cx_world, cy_world = mask_px_to_world(blob["cx"], blob["cy"])

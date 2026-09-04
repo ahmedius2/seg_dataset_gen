@@ -23,6 +23,7 @@ from dataset_config import (
     SCATTER_MARGIN_M,
     SCATTER_MAX_ATTEMPTS,
     TREE_DENSITY,
+    SCATTER_AREA_M,
 )
 
 # Fixed placement order: buildings, then cars, then trees, humans, animals, other, debris.
@@ -116,7 +117,9 @@ def scatter_background_objects(rng=random):
     """Scatter all background collections, in order, over the outer area."""
     placements = []
     scatter_info = {}
+    # randomly increase scatter density to add variety between scenes
     for collection_name, density in SCATTER_COLLECTIONS:
+        density = density * rng.uniform(0.2, 2.0)
         scatter_info[collection_name.lower()] = scatter_collection(
-            collection_name, density, placements, rng=rng, plane_size=PLANE_SIZE - 150.0)
+            collection_name, density, placements, rng=rng, plane_size=SCATTER_AREA_M)
     return scatter_info

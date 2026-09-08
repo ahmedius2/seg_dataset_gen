@@ -50,6 +50,7 @@ MODEL_SDF_HEADER = """<?xml version='1.0'?>
         </geometry>
       </collision>
       <visual name="ground_visual">
+        <laser_retro>100</laser_retro>
         <geometry>
           <mesh><uri>model://{name}/meshes/ground.{ext}</uri></mesh>
         </geometry>
@@ -57,6 +58,7 @@ MODEL_SDF_HEADER = """<?xml version='1.0'?>
 """
 
 MODEL_SDF_OBSTACLES_VISUAL = """      <visual name="obstacles_visual">
+        <laser_retro>200</laser_retro>
         <geometry>
           <mesh><uri>model://{name}/meshes/obstacles.{ext}</uri></mesh>
         </geometry>

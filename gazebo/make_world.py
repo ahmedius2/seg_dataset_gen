@@ -7,7 +7,7 @@ Usage (plain python, no bpy/blenderproc needed):
         --terrain-model rubble_scene_0000_0 \\
         --out /home/dho/work/ileri_otonom/shared/gz_ws/custom_worlds/rubble_scene_0000_0.sdf \\
         --meta output/scene_0000/meta.json \\
-        --vehicle-model iris_with_ardupilot
+        --vehicle-model iris_with_lidar
 
 If --meta is omitted (e.g. SKIP_RENDER_AND_SCAN was on, so no meta.json was
 written), the vehicle spawns at the world origin.
@@ -81,7 +81,7 @@ def parse_args():
     parser.add_argument("--terrain-model", required=True, help="Gazebo model name of the exported terrain")
     parser.add_argument("--out", required=True, help="output world .sdf path")
     parser.add_argument("--meta", default=None, help="path to a scene meta.json (for start position)")
-    parser.add_argument("--vehicle-model", default="iris_with_ardupilot")
+    parser.add_argument("--vehicle-model", default="iris_with_lidar")
     parser.add_argument("--world-name", default=None)
     parser.add_argument("--spawn-height", type=float, default=1.0,
                          help="metres above the terrain's z=0 plane to spawn the vehicle")

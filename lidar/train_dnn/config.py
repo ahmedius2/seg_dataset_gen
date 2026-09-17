@@ -42,7 +42,7 @@ class Config:
     y_max: float = 25.6
     z_min: float = -10.0 # ignore z, its using pillars
     z_max: float = 10.0
-    point_cloud_range: list[float] = field(default_factory=lambda: [-6.4, -25.6, -999.0, 6.4, 25.6, 999.0])
+    point_cloud_range: list[float] = field(default_factory=lambda: [-6.4, -25.6, -10.0, 6.4, 25.6, 10.0])
     cell_size: float = 0.1          # 0.1 m x 0.1 m = 0.01 m^2 per cell
     # z spans the full z range so every point falls into a single z pillar bucket
     pillar_dims: list[float] = field(default_factory=lambda: [0.1, 0.1, 20.0])

@@ -15,7 +15,12 @@ NUM_SCENES_TO_EXPORT_BLEND = -1
 # Override via `blenderproc run ... -- --seed=N`.
 SEED = 42
 
-OUT_DIR = "output"
+SHARED_DIR =         "/home/dho/work/ileri_otonom/shared"
+SOURCE_SCENE_PATH = f"{SHARED_DIR}/seg_dataset_gen/lidar/source_scene.blend"
+MASK_DIR =          f"{SHARED_DIR}/seg_dataset_gen/lidar/scene_masks"
+MASK_MERGE_DIR =    f"{MASK_DIR}/merged"
+OUT_DIR =           f"{SHARED_DIR}/generated_scenes"
+
 NUM_SCENES_PER_MASK = 2
 os.makedirs(OUT_DIR, exist_ok=True)
 
@@ -26,7 +31,6 @@ NUM_FRAMES_PER_SCENE = 1
 # Number of Blender frames used to let active obstacles settle on the passive
 # ground before the cameras and LiDAR capture the scene.
 # PHYSICS_SETTLE_FRAMES = 120
-
 
 MIN_DIST_BTW_START_TARGET = 50.0  # meters: start/target must be far apart to avoid trivial paths
 PLANE_SIZE = 300.0               # visible ground plane size in meters
@@ -47,7 +51,6 @@ GROUND_NOISE_CELL_SIZE_CHOICES = [0.5, 1.0, 2.0]
 # is 1 / total_scenes, so the last scene lands on MAX).
 GROUND_NOISE_VALUE_MIN = 0.01     # meters
 GROUND_NOISE_VALUE_MAX = 0.15     # meters
-
 
 FLIGHT_ALT_MIN = 30.0
 FLIGHT_ALT_MAX = 40.0
@@ -101,7 +104,6 @@ RENDER_RES_Y = LIDAR_SENSOR_PARAMS['resolutionY']
 # 100x100 px bird's-eye masks describe the inner AREA_SIZE x AREA_SIZE region.
 # Black blobs = rubble piles, white = clear path, red blobs = barricades.
 
-MASK_DIR = "/home/dho/work/shared/ileri_otonom/seg_dataset_gen/lidar/scene_masks"
 MASK_PX = 100                     # mask is MASK_PX x MASK_PX pixels
 PIX_SIZE = AREA_SIZE_M / MASK_PX  # meters per mask pixel (50/100 = 0.5 m/px)
 
@@ -109,7 +111,7 @@ PIX_SIZE = AREA_SIZE_M / MASK_PX  # meters per mask pixel (50/100 = 0.5 m/px)
 # then downscale back to MASK_PX x MASK_PX so it drops into the pipeline unchanged.
 MASK_MERGE_MODE = True            # when True, generate+use merged masks instead of the raw ones
 MASK_MERGE_RANDOM_ORDER = False    # False = merge consecutive masks; True = shuffle first
-MASK_MERGE_DIR = "/home/dho/work/shared/ileri_otonom/seg_dataset_gen/lidar/scene_masks/merged"
+
 
 # Classification thresholds on 0..1 normalized RGB.
 BLACK_LEVEL = 0.35                # pixel is "rubble" if max(R,G,B) < BLACK_LEVEL
@@ -146,7 +148,6 @@ CLEARED_BARRICADE_FRACTION = 0.33
 # Start/target sampling in mask space.
 MIN_DIST_BTW_START_TARGET_PX = MIN_DIST_BTW_START_TARGET / PIX_SIZE
 
-SOURCE_SCENE_PATH = "/home/dho/work/shared/ileri_otonom/seg_dataset_gen/lidar/rubbles.blend"
 
 # ----
 # Background scattering (Buildings/Cars/Trees/Humans/Animals/Other)
@@ -170,7 +171,7 @@ SCATTER_MARGIN_M = 1.0       # meters, extra gap enforced between scattered obje
 SCATTER_MAX_ATTEMPTS = 200   # rejection-sampling attempts per object before giving up
 
 
-# list of object collections in the rubbles scene:
+# list of object collections in the source scene:
 """
 Barriers
 Humans

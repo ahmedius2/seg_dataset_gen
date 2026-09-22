@@ -58,7 +58,7 @@ class Config:
     #min_points: int = 16
 
     # ---- Optimization ----
-    epochs: int = 40
+    epochs: int = 50
     batch_size: int = 4
     lr: float = 2e-3
     weight_decay: float = 1e-4

@@ -87,7 +87,7 @@ def main():
     bproc.init()
     configure_blender_gpu()
 
-    scenes_dir = os.path.join(OUT_DIR, "scenes")
+    scenes_dir = OUT_DIR
     os.makedirs(scenes_dir, exist_ok=True)
     mask_files = list_mask_files(MASK_DIR)
     if not mask_files:

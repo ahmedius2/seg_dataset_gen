@@ -61,7 +61,7 @@ CORNERS = [
     (half_width, -half_height)    # Bottom-Right
 ]
 
-SWATH_WIDTH = 25.0  # Spacing between scan lines
+SWATH_WIDTH = 15.0  # Spacing between scan lines
 
 
 def start_data_collection_rosbag():
@@ -83,13 +83,18 @@ def start_data_collection_rosbag():
             stderr=subprocess.STDOUT,
             start_new_session=True
         )
+        #check if the process started successfully
+        time.sleep(5)  # Give it a moment to start
+        if ROSBAG_PROC.poll() is not None:
+            print(f"Failed to start rosbag recording. Check {LOG_PATH} for details.")
+            sys.exit(1)
 
 def stop_data_collection_rosbag():
     global ROSBAG_PROC
     if ROSBAG_PROC:
         os.killpg(os.getpgid(ROSBAG_PROC.pid), signal.SIGINT)
         try:
-            ROSBAG_PROC.wait(timeout=5)
+            ROSBAG_PROC.wait(timeout=10)
             print("Rosbag recording stopped successfully.")
         except subprocess.TimeoutExpired:
             print("Process timed out. Sending SIGKILL...")
@@ -228,7 +233,7 @@ if __name__ == '__main__':
     vehicle = connect(CONNECTION_STRING, wait_ready=True)
 
     # Generate scan plan waypoints
-    random_rotate_angle = random.Random(RANDOM_SEED).uniform(0, 45)
+    random_rotate_angle = random.Random(RANDOM_SEED).uniform(0, 30)
     print(f"Random rotation angle: {random_rotate_angle:.1f}°")
     scan_waypoints = generate_rotated_scan_path(CORNERS, SWATH_WIDTH, random_rotate_angle)
     print(f"\nGenerated scan path with {len(scan_waypoints)} waypoints.")

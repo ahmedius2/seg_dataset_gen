@@ -1,6 +1,7 @@
 """PLY loading, ground-truth rasterization, and the torch Dataset."""
 
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import torch
@@ -180,7 +181,7 @@ def split_files(files, cfg: Config):
 
         n = len(keys)
         n_val = max(1, int(round(n * cfg.val_fraction))) if n > 2 else 0
-        n_test = max(1, int(round(n * cfg.test_fraction))) if n > 4 else 0
+        n_test = int(round(n * cfg.test_fraction)) if n > 4 else 0
         val_keys = set(keys[:n_val])
         test_keys = set(keys[n_val:n_val + n_test])
 
@@ -216,6 +217,9 @@ class BEVOccupancyDataset(Dataset):
         self.files = list(files)
         self.cfg = cfg
         self.train = train
+        # Lazy cache: each sample is decoded only when first requested.
+        self._cache: list[Any] | None = (
+            [None] * len(self.files) if cfg.cache_in_memory else None)
 
     def __len__(self):
         return len(self.files)
@@ -224,15 +228,15 @@ class BEVOccupancyDataset(Dataset):
         cfg = self.cfg
         path = self.files[index]
 
-        xyz, intensity = load_cloud(path)
-
-        finite = np.isfinite(xyz).all(axis=1) & np.isfinite(intensity)
-        if not finite.all():
-            xyz, intensity = xyz[finite], intensity[finite]
-
-        # Ground truth is built from the FULL cloud, before subsampling, so
-        # the label never depends on the sampling seed.
-        occ, observed = rasterize_occupancy(xyz, intensity, cfg)
+        if self._cache is None:
+            xyz, intensity, occ, observed = self._load_sample(path)
+        else:
+            cached = self._cache[index]
+            if cached is None:
+                xyz, _intensity, occ, observed = self._load_sample(path)
+                cached = (xyz, occ, observed)
+                self._cache[index] = cached
+            xyz, occ, observed = cached
 
         n = xyz.shape[0]
         max_points = getattr(cfg, "max_points", None)
@@ -253,6 +257,17 @@ class BEVOccupancyDataset(Dataset):
             "n_occupied": int(occ.sum()),
         }
         return points, occ, weight, meta
+
+    def _load_sample(self, path):
+        xyz, intensity = load_cloud(path)
+
+        finite = np.isfinite(xyz).all(axis=1) & np.isfinite(intensity)
+        if not finite.all():
+            xyz, intensity = xyz[finite], intensity[finite]
+
+        # Build labels from the full cloud before any point subsampling.
+        occ, observed = rasterize_occupancy(xyz, intensity, self.cfg)
+        return xyz, intensity, occ, observed
 
     def _normalize(self, xyz):
         """Return xyz in meters, matching the VFE point_cloud_range."""

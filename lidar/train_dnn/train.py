@@ -293,7 +293,13 @@ def main():
 
     set_seed(cfg.seed)
     out_dir = Path(cfg.out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    # add a number to out_dir, if it already exists, increment the number until we find a free one
+    if out_dir.exists():
+        i = 1
+        while (out_dir.parent / f"{out_dir.name}_{i:03d}").exists():
+            i += 1
+        out_dir = out_dir.parent / f"{out_dir.name}_{i:03d}"
+    out_dir.mkdir(parents=True, exist_ok=False)
     cfg.to_json(out_dir / "config.json")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

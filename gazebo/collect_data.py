@@ -9,8 +9,6 @@ import time
 import math
 import os
 import sys
-import signal
-import subprocess
 import time
 import numpy as np
 from dronekit import connect, VehicleMode
@@ -21,16 +19,17 @@ def generate_random_seed(string):
     return hash(string) % (2**32)
 
 # Define output file and command
-if len(sys.argv) < 2:
-    print("Usage: python collect_data.py <run_directory>")
+if len(sys.argv) < 3 or sys.argv[2] not in ("takeoff", "mission"):
+    print("Usage: python collect_data.py <run_directory> <takeoff|mission>")
+    print("  takeoff : connect, arm, take off, and navigate to the scan start position, then exit")
+    print("  mission : connect to the already-flying vehicle, run the scan pattern, RTL, then exit")
     sys.exit(1)
 
 RUN_DIR = sys.argv[1]
+PHASE = sys.argv[2]
 print(f"Data collection run directory: {RUN_DIR}")
+print(f"Phase: {PHASE}")
 os.makedirs(RUN_DIR, exist_ok=True)
-LOG_PATH = os.path.join(RUN_DIR, "rosbag.log")
-BAG_OUTPUT_PATH = os.path.join(RUN_DIR, "bag_recording")
-ROSBAG_PROC = None  # Global variable to hold the rosbag process
 
 # generate the random seed number using the scene name environment variable, which is set by the calling script
 SCENE_NAME = os.getenv('SCENE_NAME', 'scene_0000_0')
@@ -64,42 +63,6 @@ CORNERS = [
 SWATH_WIDTH = 15.0  # Spacing between scan lines
 
 
-def start_data_collection_rosbag():
-    cmd = [
-        "ros2", "bag", "record",
-        "--use-sim-time",
-        "-o", BAG_OUTPUT_PATH,
-        "--topics",
-        "/sim_lidar/pointcloud/downsampled",
-        "/tf_throttled"
-    ]
-    # --- 1. START RECORDING ---
-    with open(LOG_PATH, "w") as log_file:
-        # start_new_session=True creates an isolated process group
-        global ROSBAG_PROC
-        ROSBAG_PROC = subprocess.Popen(
-            cmd,
-            stdout=log_file,
-            stderr=subprocess.STDOUT,
-            start_new_session=True
-        )
-        #check if the process started successfully
-        time.sleep(5)  # Give it a moment to start
-        if ROSBAG_PROC.poll() is not None:
-            print(f"Failed to start rosbag recording. Check {LOG_PATH} for details.")
-            sys.exit(1)
-
-def stop_data_collection_rosbag():
-    global ROSBAG_PROC
-    if ROSBAG_PROC:
-        os.killpg(os.getpgid(ROSBAG_PROC.pid), signal.SIGINT)
-        try:
-            ROSBAG_PROC.wait(timeout=10)
-            print("Rosbag recording stopped successfully.")
-        except subprocess.TimeoutExpired:
-            print("Process timed out. Sending SIGKILL...")
-            os.killpg(os.getpgid(ROSBAG_PROC.pid), signal.SIGKILL)
-
 def gazebo_to_ned(x, y, z, spawn=SPAWN_POS):
     """
     Converts absolute Gazebo ENU coordinates (X, Y, Z) to ArduPilot
@@ -125,7 +88,7 @@ def goto_local_ned(vehicle, north, east, down):
         0,       # time_boot_ms
         0, 0,    # target system, target component
         mavutil.mavlink.MAV_FRAME_LOCAL_NED,
-        0b0000111111110000, # Position-only mask
+        0b000011110000, # Position-only mask
         north, east, down,
         0, 0, 0, # Velocities
         0, 0, 0, # Accelerations
@@ -232,34 +195,36 @@ if __name__ == '__main__':
     print(f"Connecting to SITL on {CONNECTION_STRING}...")
     vehicle = connect(CONNECTION_STRING, wait_ready=True)
 
-    # Generate scan plan waypoints
-    random_rotate_angle = random.Random(RANDOM_SEED).uniform(0, 30)
-    print(f"Random rotation angle: {random_rotate_angle:.1f}°")
-    scan_waypoints = generate_rotated_scan_path(CORNERS, SWATH_WIDTH, random_rotate_angle)
-    print(f"\nGenerated scan path with {len(scan_waypoints)} waypoints.")
-
     try:
-        set_speed(vehicle, TARGET_SPEED)
+        if PHASE == "takeoff":
+            # --- PHASE 1: Arm, take off, and navigate to the scan start position ---
+            set_speed(vehicle, TARGET_SPEED)
+            arm_and_takeoff_local(vehicle, START_POS['x'], START_POS['y'], START_POS['z'])
+            print("\nTakeoff phase complete. Vehicle is holding at the scan start position.")
+            print("You can now start rosbag recording, then run this script again with the 'mission' phase.")
 
-        # Arm and fly to designated start position (X, Y, Z)
-        arm_and_takeoff_local(vehicle, START_POS['x'], START_POS['y'], START_POS['z'])
+        elif PHASE == "mission":
+            # --- PHASE 2: Run the scan pattern and RTL ---
+            # Generate scan plan waypoints
+            random_rotate_angle = random.Random(RANDOM_SEED).uniform(0, 30)
+            print(f"Random rotation angle: {random_rotate_angle:.1f}°")
+            scan_waypoints = generate_rotated_scan_path(CORNERS, SWATH_WIDTH, random_rotate_angle)
+            print(f"\nGenerated scan path with {len(scan_waypoints)} waypoints.")
 
-        start_data_collection_rosbag()
+            set_speed(vehicle, TARGET_SPEED)
 
-        # Execute Lawnmower Grid
-        for i, (wx, wy) in enumerate(scan_waypoints):
-            # choose a new altitude randomly between TARGET_ALTITUDE and TARGET_ALTITUDE + 5.0 meters for each waypoint
-            new_altitude = random.Random(RANDOM_SEED + i).uniform(TARGET_ALTITUDE - 10.0, TARGET_ALTITUDE + 10.0)
-            print(f"\n[Leg {i+1}/{len(scan_waypoints)}] Navigating to Gazebo (X: {wx:.1f}, Y: {wy:.1f}, Z: {new_altitude:.1f})")
+            # Execute Lawnmower Grid
+            for i, (wx, wy) in enumerate(scan_waypoints):
+                # choose a new altitude randomly between TARGET_ALTITUDE and TARGET_ALTITUDE + 5.0 meters for each waypoint
+                new_altitude = random.Random(RANDOM_SEED + i).uniform(TARGET_ALTITUDE - 10.0, TARGET_ALTITUDE + 10.0)
+                print(f"\n[Leg {i+1}/{len(scan_waypoints)}] Navigating to Gazebo (X: {wx:.1f}, Y: {wy:.1f}, Z: {new_altitude:.1f})")
 
-            target_n, target_e, target_d = gazebo_to_ned(wx, wy, new_altitude)
-            wait_to_reach_target(vehicle, target_n, target_e, target_d)
+                target_n, target_e, target_d = gazebo_to_ned(wx, wy, new_altitude)
+                wait_to_reach_target(vehicle, target_n, target_e, target_d)
 
-        stop_data_collection_rosbag()
-
-        print("\nScan pattern execution complete!")
-        print("Returning to Launch (RTL)...")
-        vehicle.mode = VehicleMode("RTL")
+            print("\nScan pattern execution complete!")
+            print("Returning to Launch (RTL)...")
+            vehicle.mode = VehicleMode("RTL")
 
     finally:
         time.sleep(2)

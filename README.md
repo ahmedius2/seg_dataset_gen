@@ -1,201 +1,30 @@
-# Synthetic Aerial Segmentation Dataset Generator
+# How to use
 
-Generates a three-class instance segmentation dataset (traversable, obstacle,
-and target)
-by rendering your Blender scene from simulated fixed-wing drone viewpoints,
-then converts the outputs into **Ultralytics YOLO11-seg** format.
-
----
-
-## File overview
-
-| File | Purpose |
-|---|---|
-| `generate_dataset.py` | BlenderProc script — renders RGB images + class and instance maps |
-| `convert_to_yolo.py` | Standard Python script — converts maps → YOLO-seg labels |
-| `train_yolo11_seg.py` | Trains the Ultralytics YOLO11-seg nano model |
-| `README.md` | Project documentation and usage instructions |
-
----
-
-## Step 0 — Install dependencies
-
-```bash
-# BlenderProc (installs its own Blender internally)
-pip install blenderproc
-
-# For convert_to_yolo.py (run with your system / venv Python, NOT blenderproc run)
-pip install opencv-python numpy pyyaml imageio
-
-# For training
-pip install ultralytics
+1. Generate the blender scenes by running the command below. Note that you will need the source\_scene.blend file since scene are generated using it. Before running, check dataset\_config.py
+and make any modifications you see necessary such as adjusting the paths.
 ```
-
----
-
-## Step 1 — Prepare your Blender scene
-
-Before running the generator, do the following inside Blender:
-
-### 1a. Find exact object names
-Select each object → look at **Properties panel → Object Properties (orange square icon) → Name**.
-
-You need:
-- The **exact name** of the ground plane mesh (default assumption: `"Ground"`)
-- The names of obstacle meshes (or leave `OBSTACLE_KEYWORDS = []` to auto-detect everything else as obstacle)
-
-### 1b. Make sure the ground plane covers the full 300×300 m area
-The camera will sometimes be positioned at the edges of the 50×50 m inner zone; the ground plane must extend far enough not to show any void.
-
-### 1c. Remove any existing camera from the scene (optional but recommended)
-BlenderProc creates its own camera. Having two cameras in the scene will not break anything, but it is cleaner to remove the original one.
-
-### 1d. UV-unwrap the ground plane
-The texture randomisation works through UV coordinates. Select the ground plane → **Tab (Edit Mode)** → **U → Smart UV Project** → **OK**.  
-Without UV coordinates, the textures will not appear on the ground.
-
----
-
-## Step 2 — Edit the CONFIG block in `generate_dataset.py`
-
-Open `generate_dataset.py` and update the values at the top:
-
-```python
-BLEND_FILE      = "/absolute/path/to/your/scene.blend"
-TEXTURES_ROOT   = "/absolute/path/to/ground_textures"
-OUTPUT_DIR      = "/absolute/path/to/output"
-NUM_IMAGES      = 100
-GROUND_OBJ_NAME = "Ground"          # exact name from Step 1a
-TARGET_OBJ_NAME = "Target"          # exact target object name
-TARGET_TEXTURES_ROOT = "/absolute/path/to/target_textures"
+cd lidar
+blenderproc run lidar_generate_dataset.py
+cd ..
 ```
+This will create .scene files and place them in a folder named generated\_scenes.
 
-For each sample, obstacle objects matching `OBSTACLE_KEYWORDS` either retain
-their original layout or have their original positions shuffled. Randomized
-samples also apply the configured presence probability and slight scale
-variation. Target overlap is checked and the overlapping obstacle is hidden.
-`ORIGINAL_OBSTACLE_LAYOUT_FRACTION` controls the fraction of samples that keep
-the original layout. Set `OBSTACLE_KEYWORDS = []` to include every mesh except
-the ground and target.
-
-Also check the drone camera parameters and adjust to your real drone specs:
-
-```python
-DRONE_ALT_MIN  = 35.0   # metres above ground
-DRONE_ALT_MAX  = 60.0
-CAM_HFOV_DEG   = 70.0   # horizontal FOV of the camera
-MAX_TILT_DEG   = 8.0    # max off-nadir tilt
+2. Next is to export these scenes into model files which gazebo can use. Adjust the path in the script to point the correct directory before running.
 ```
-
-Every render randomly selects one PNG from `TARGET_TEXTURES_ROOT` for the
-`Target` object. The generator also varies sun direction, sun energy, sun
-color, world illumination strength, and exposure for each sample.
-
-And make sure `INNER_CX`, `INNER_CY`, `INNER_HALF` match the actual world-space
-coordinates of your 50×50 m obstacle area.
-
----
-
-## Step 3 — Generate images + masks
-
-```bash
-blenderproc run generate_dataset.py
+cd gazebo
+./export_all.sh
 ```
+Now you have custom\_models and custom\_worlds directories which gazebo can import. Update GZ\_SIM\_RESOURCE\_PATH environment variable so gazebo have access to these directories.
 
-This will print progress and write to `OUTPUT_DIR/`:
+3. Run the below command to create the dataset by running simulations on gazebo:
 ```
-output/
-├── images/
-│   ├── 0000.png   ← RGB render (640×640)
-│   ├── 0001.png
-│   └── ...
-├── masks/
-│   ├── 0000.png   ← class map (0=traversable, 1=obstacle, 2=target)
-│   ├── 0001.png
-│   └── ...
-├── instances/
-│   ├── 0000.png   ← 16-bit BlenderProc instance IDs
-│   └── ...
-├── preview/
-│   ├── 0000_classes.png   ← colorized classes for inspection
-│   ├── 0000_instances.png ← colorized instance IDs
-│   └── 0000_overlay.png   ← RGB with class colors overlaid
-└── dataset_meta.json
+./runsimall.sh
+cd ..
 ```
+This will create the simulation\_data and dnn\_dataset folders.
 
-> **Tip — check a few pairs visually before generating 100 images.**
-> Compare the RGB image with the class map and instance map. Every visible
-> object should have a non-zero instance ID and the `Target` object should
-> have class ID 2.
-
----
-
-## Step 4 — Edit the CONFIG block in `convert_to_yolo.py`
-
-```python
-OUTPUT_DIR = "/absolute/path/to/output"      # same as above
-YOLO_DIR   = "/absolute/path/to/yolo_dataset"
+4. Now you can train the dnn that does ground segmentation. 
 ```
-
----
-
-## Step 5 — Convert to YOLO-seg format
-
-Run this with your **system / venv Python** (not `blenderproc run`):
-
-```bash
-python convert_to_yolo.py
+cd lidar
+python -m train_dnn.train
 ```
-
-Output structure:
-```
-yolo_dataset/
-├── images/
-│   ├── train/   (80 %)
-│   └── val/     (20 %)
-├── labels/
-│   ├── train/   (.txt files with polygon annotations)
-│   └── val/
-└── dataset.yaml
-```
-
-Enable `DEBUG = True` in `convert_to_yolo.py` to generate overlay images
-showing the detected polygons drawn on top of the RGB images — useful for
-verifying that the contour extraction is working correctly.
-
----
-
-## Step 6 — Train YOLO11-seg
-
-```bash
-python train_yolo11_seg.py
-```
-
-Edit the training configuration at the top of `train_yolo11_seg.py` to change
-the model, GPU/CPU device, epochs, batch size, or output run name.
-
-Start with `yolo11n-seg.pt` (nano) for fast iteration.
-Switch to `yolo11s-seg.pt` or `yolo11m-seg.pt` once the pipeline is validated.
-
----
-
-## Troubleshooting
-
-| Symptom | Likely cause | Fix |
-|---|---|---|
-| All class-map pixels are 0 | No category IDs assigned | Check object names and the generator log |
-| Target is labelled as obstacle | Target name mismatch | Set `TARGET_OBJ_NAME` to the exact Blender object name |
-| Textures not showing | Ground has no UV map | UV-unwrap the ground plane in Blender (Step 1d) |
-| `Object 'Ground' not found` | Name mismatch | Check the exact object name in Blender Properties panel |
-| Renders are very dark | Sun not created / low energy | Check `setup_or_randomise_sun()` or increase `DRONE_ALT_MAX` |
-| Empty YOLO label files | No obstacles visible in those views | Normal for some camera positions; these act as negative samples |
-| Camera sees ground edge (void) | Ground plane too small | Extend the ground plane beyond 300×300 m in Blender |
-
----
-
-## What to add next
-
-- **Obstacle position randomisation** — in the generation loop, after loading the scene, translate/rotate obstacle objects to random positions within the inner area before each render.
-- **HDRI sky randomisation** — replace the sun with random HDRI environment maps for better lighting variety.
-- **Camera height variation** — already implemented; widen the altitude range for more scale variation.
-- **More texture sets** — download additional Poly Haven ground/gravel/soil textures and drop them into `TEXTURES_ROOT`.

@@ -44,18 +44,7 @@ do
     output_dir="${HOME}/shared/dnn_dataset/${scene_name}"
     mkdir -p "$output_dir"
 
-    echo "Renaming tf"
-    rm -rf ${scene_dir}/bag_recording_fixed
-    python tf_rename.py ${scene_dir}/bag_recording ${scene_dir}/bag_recording_fixed ${scene_name} world
-
     echo "Starting pc_transform..."
-
-    #ros2 run copter_lidar_gzsim pc_transform \
-    #    --ros-args \
-    #    -p "world_frame:=world" \
-    #    -p "use_sim_time:=true" \
-    #    -p "output_dir:=${output_dir}" \
-    #    > "${output_dir}/pc_transform.log" 2>&1 &
 
     ros2 launch pc_transform_cpp pc_transform.launch.py
         world_frame:=world \

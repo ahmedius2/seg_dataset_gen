@@ -72,8 +72,20 @@ run_job "$RUN_DIR/simulation_bridge.log" ros2 launch copter_lidar_gzsim simulati
 run_job "$RUN_DIR/topic_throttle.log" ros2 run topic_tools throttle messages /tf 20.0 /tf_throttled
 
 sleep 120  # wait for initialization
-printf "Waited 120 seconds for initialization, starting to collect data.\n"
-python $CUR_PWD/collect_data.py $RUN_DIR  # this task will end by itself
+printf "Waited 120 seconds for initialization, starting to takeoff.\n"
+python $CUR_PWD/collect_data.py $RUN_DIR takeoff
+run_job "$RUN_DIR/rosbag.log" ros2 bag record --use-sim-time -o "$RUN_DIR/bag_recording" \
+        --topics /sim_lidar/pointcloud/downsampled /tf_throttled
+
+output_dir="${HOME}/shared/dnn_dataset/${SCENE_NAME}"
+mkdir -p $output_dir
+run_job "$RUN_DIR/pc_transform.log" ros2 launch pc_transform_cpp pc_transform.launch.py \
+        world_frame:=${SCENE_NAME} \
+        use_sim_time:=true \
+        output_dir:=${output_dir} \
+        save_clouds:=true \
+        save_poses:=true
+python $CUR_PWD/collect_data.py $RUN_DIR mission
 
 popd
 cleanup

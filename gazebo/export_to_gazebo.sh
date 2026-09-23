@@ -39,6 +39,6 @@ python3 "$SCRIPT_DIR/make_world.py" \
   --out "$WORLD_FILE" \
   "${META_ARGS[@]}"
 
-echo "Done. Inside the gz_ardupilot container run:"
-echo "  gz sim -v4 -r $SCENE_NAME.sdf"
-echo "  sim_vehicle.py -v ArduCopter -f gazebo-iris --model JSON"
+#echo "Done. Inside the gz_ardupilot container run:"
+#echo "  gz sim -v4 -r $SCENE_NAME.sdf"
+#echo "  sim_vehicle.py -v ArduCopter -f gazebo-iris --model JSON"

@@ -139,13 +139,24 @@ def rasterize_occupancy(xyz, intensity, cfg: Config):
     if is_occ.any():
         occ[i[is_occ], j[is_occ]] = 1.0
 
-    # apply 50x50 max pooling to fill in small holes in the occupancy mask
-    occ_tensor = torch.from_numpy(occ).unsqueeze(0).unsqueeze(0)
-    occ_tensor = F.max_pool2d(occ_tensor, kernel_size=11, stride=1, padding=5)
-    occ = occ_tensor.squeeze().numpy()
+    # Fill small holes in the occupancy mask.
+    occ = dilate_bev_mask(occ, 11)
 
     return occ, observed
 
+
+def dilate_bev_mask(mask, kernel_size=11):
+    """Max-pool a BEV mask so nearby empty cells are treated as covered."""
+    if kernel_size is None or kernel_size <= 1:
+        return mask
+    tensor = torch.from_numpy(np.asarray(mask, dtype=np.float32))
+    tensor = tensor.unsqueeze(0).unsqueeze(0)
+    pad = kernel_size // 2
+    tensor = F.max_pool2d(tensor, kernel_size=kernel_size, stride=1, padding=pad)
+    out = tensor.squeeze().numpy()
+    if np.asarray(mask).dtype == bool:
+        return out > 0.5
+    return out.astype(np.float32)
 
 # --------------------------------------------------------------------------- #
 #  Dataset
@@ -238,6 +249,8 @@ class BEVOccupancyDataset(Dataset):
                 self._cache[index] = cached
             xyz, occ, observed = cached
 
+        xyz = self._augment(xyz, index)
+
         n = xyz.shape[0]
         max_points = getattr(cfg, "max_points", None)
         if max_points is not None and n > max_points:
@@ -268,6 +281,30 @@ class BEVOccupancyDataset(Dataset):
         # Build labels from the full cloud before any point subsampling.
         occ, observed = rasterize_occupancy(xyz, intensity, self.cfg)
         return xyz, intensity, occ, observed
+
+    def _augment(self, xyz, index):
+        """Z-only geometric augs on a copy of xyz. Labels are not modified."""
+        if not self.train:
+            return xyz
+
+        cfg = self.cfg
+        do_shift = cfg.aug_z_shift
+        do_invert = cfg.aug_z_invert and cfg.aug_z_invert_prob > 0
+        if not do_shift and not do_invert:
+            return xyz
+
+        xyz = xyz.copy()
+        rng = np.random.default_rng(
+            (torch.initial_seed() + index + 1) % (2 ** 31))
+
+        if do_shift:
+            shift = rng.uniform(cfg.aug_z_shift_min, cfg.aug_z_shift_max)
+            xyz[:, 2] += np.float32(shift)
+
+        if do_invert and rng.random() < cfg.aug_z_invert_prob:
+            xyz[:, 2] *= -1.0
+
+        return xyz
 
     def _normalize(self, xyz):
         """Return xyz in meters, matching the VFE point_cloud_range."""

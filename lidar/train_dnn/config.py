@@ -60,6 +60,15 @@ class Config:
     # Set False to reread and preprocess PLY files on every access.
     cache_in_memory: bool = True
 
+    # ---- Train-time augmentations (input points only; GT is unchanged) ----
+    # Uniform random translation of every point along z, in meters.
+    aug_z_shift: bool = True
+    aug_z_shift_min: float = -1.0
+    aug_z_shift_max: float = 1.0
+    # Randomly negate every point's z coordinate (z -> -z).
+    aug_z_invert: bool = True
+    aug_z_invert_prob: float = 0.5
+
     # ---- Optimization ----
     epochs: int = 50
     batch_size: int = 8
@@ -85,6 +94,9 @@ class Config:
     save_every: int = 5
     eval_threshold: float = 0.5
     val_visualizations: int = 4
+    # Dilate the LiDAR-hit mask when hiding unconstrained predictions.
+    # Training still ignores only cells that received no points.
+    pred_coverage_kernel: int = 11
 
     # ---- Derived ----
     grid_h: int = field(init=False, default=0)

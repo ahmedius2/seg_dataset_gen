@@ -14,8 +14,8 @@ from PIL import Image, ImageDraw, ImageFont
 
 
 from .config import Config
-from .dataset import (BEVOccupancyDataset, collate_fn, discover_files,
-                      split_files)
+from .dataset import (BEVOccupancyDataset, collate_fn, dilate_bev_mask,
+                      discover_files, split_files)
 from .losses import build_loss
 from .metrics import average_precision, confusion_counts, metrics_from_counts
 
@@ -218,15 +218,17 @@ def save_validation_visualizations(model, loader, device, cfg, epoch, out_dir):
 
         for index in range(target.shape[0]):
             observed = weight[index].numpy() > 0.5
+            coverage = dilate_bev_mask(observed, cfg.pred_coverage_kernel)
             target_image = target[index].numpy() > 0.5
             prob_image = probability[index].numpy()
             pred_image = prediction[index].numpy()
 
+            unknown = 32 # gray pixel value
             panels = [
-                np.where(observed, 255, 32).astype(np.uint8),
-                (target_image * 255).astype(np.uint8),
-                (prob_image * 255).clip(0, 255).astype(np.uint8),
-                (pred_image * 255).astype(np.uint8),
+                np.where(coverage, observed * 255, unknown).astype(np.uint8),   # raw observed
+                np.where(coverage, target_image * 255, unknown).astype(np.uint8),
+                np.where(coverage, (prob_image * 255).clip(0, 255), unknown).astype(np.uint8),
+                np.where(coverage, pred_image * 255, unknown).astype(np.uint8),
             ]
 
             # Stack panels horizontally, then add a labeled header strip.

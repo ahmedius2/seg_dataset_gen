@@ -1,0 +1,73 @@
+<?xml version="1.0" ?>
+<sdf version="1.9">
+<model name="iris_with_lidar">
+<include>
+  <uri>model://iris_with_ardupilot</uri>
+  <name>iris</name>
+  <pose>0 0 0 0 0 0</pose>
+</include>
+
+<plugin
+  filename="gz-sim-pose-publisher-system"
+  name="gz::sim::systems::PosePublisher">
+  <publish_link_pose>true</publish_link_pose>
+  <publish_sensor_pose>true</publish_sensor_pose>
+  <publish_visual_pose>false</publish_visual_pose>
+  <publish_nested_model_pose>true</publish_nested_model_pose>
+  <use_pose_vector_msg>true</use_pose_vector_msg>
+</plugin>
+
+<link name="lidar_link">
+  <pose relative_to="iris::iris_with_standoffs::base_link">0 0 -0.10 0 1.5708 0</pose>
+  <inertial>
+    <mass>0.3</mass>
+    <inertia>
+      <ixx>0.0001</ixx><ixy>0</ixy><ixz>0</ixz>
+      <iyy>0.0001</iyy><iyz>0</iyz>
+      <izz>0.0001</izz>
+    </inertia>
+  </inertial>
+
+  <sensor name="robosense_emx192" type="gpu_lidar">
+    <pose>0 0 0 0 0 0</pose>
+    <update_rate>10</update_rate>
+    <topic>sim_lidar/pointcloud</topic>
+    <ray>
+      <scan>
+        <horizontal>
+          <samples>1750</samples>
+          <resolution>1</resolution>
+          <min_angle>-1.22173</min_angle>
+          <max_angle>1.22173</max_angle>
+        </horizontal>
+        <vertical>
+          <samples>192</samples>
+          <resolution>1</resolution>
+          <min_angle>-0.17453</min_angle>
+          <max_angle>0.17453</max_angle>
+        </vertical>
+      </scan>
+      <range>
+        <min>0.3</min>
+        <max>300.0</max>
+        <resolution>0.01</resolution>
+      </range>
+      <noise>
+        <type>gaussian</type>
+        <mean>0.0</mean>
+        <stddev>0.015</stddev>
+      </noise>
+    </ray>
+    <always_on>1</always_on>
+    <visualize>false</visualize>
+  </sensor>
+</link>
+
+<joint name="lidar_joint" type="fixed">
+  <parent>iris::iris_with_standoffs::base_link</parent>
+  <child>lidar_link</child>
+</joint>
+
+</model>
+</sdf>
+

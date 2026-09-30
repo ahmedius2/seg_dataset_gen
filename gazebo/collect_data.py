@@ -40,7 +40,7 @@ RANDOM_SEED = generate_random_seed(SCENE_NAME)
 # --- 1. CONFIGURE SCANNING & SPAWN PARAMETERS ---
 CONNECTION_STRING = 'tcp:127.0.0.1:5762'  # SITL second connection
 
-TARGET_SPEED = 5.0  # m/s
+TARGET_SPEED = 10.0  # m/s
 TARGET_ALTITUDE = 35.0  # m above ground (Gazebo Z)
 
 # DRONE SPAWN POSITION IN GAZEBO (ENU)
@@ -51,7 +51,7 @@ SPAWN_POS = {'x': 150.0, 'y': 0.0, 'z': 1.0}
 START_POS = {'x': 150.0, 'y': 0.0, 'z': TARGET_ALTITUDE} # The z here is the flying altitude for the scan pattern
 
 # Define area bounds centered at (0,0) in Gazebo ENU
-SCAN_AREA_SIZE = (100.0, 100.0)  # (width, height)
+SCAN_AREA_SIZE = (150.0, 150.0)  # (width, height)
 half_width = SCAN_AREA_SIZE[0] / 2.0
 half_height = SCAN_AREA_SIZE[1] / 2.0
 
@@ -190,7 +190,9 @@ def generate_rotated_scan_path(corners, spacing, angle_degrees=0.0, pivot=None):
         rotate_point(x, y, cx, cy, angle_rad) for x, y in standard_waypoints
     ]
 
-    return rotated_waypoints
+    # reversing is not necessary but it makes the first waypoint the
+    # bottom-left corner of the scan area, which is more intuitive
+    return list(reversed(rotated_waypoints))
 
 # --- MAIN RUN SCRIPT ---
 if __name__ == '__main__':

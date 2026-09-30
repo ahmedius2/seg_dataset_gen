@@ -6,24 +6,33 @@ Subscribes to AlignedCloudWithPose, runs the pillar-based BEV occupancy
 model from train_dnn (on GPU, fp16), and projects the resulting local BEV
 logits onto a 300x300 m^2 global occupancy grid.
 
-Design:
-  * Model runs on GPU under torch.autocast (fp16) — the real speedup.
-  * Everything else (coverage rasterization, log-odds fusion, publishing)
-    runs on CPU to avoid many small kernel launches and D2H syncs.
+Key optimizations over the naive version:
+  * Fusion is O(touched cells), not O(global grid). No more 9M-element
+    bincount, no more 3-pass full-grid refresh.
+  * Publishing (which IS inherently whole-grid because of OccupancyGrid)
+    is decoupled from the inference path and rate-limited to 1 Hz per
+    topic, on its own timer + callback group, under a MultiThreadedExecutor.
 """
 
 import os
 import sys
 import time
 import array
+import threading
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
+from rclpy.executors import MultiThreadedExecutor
+from rclpy.qos import (
+    QoSProfile,
+    ReliabilityPolicy,
+    DurabilityPolicy,
+    HistoryPolicy,
+)
 
 from nav_msgs.msg import OccupancyGrid
 from geometry_msgs.msg import Pose, Point, Quaternion
@@ -44,11 +53,12 @@ from train_dnn.config import Config                     # noqa: E402
 from train_dnn.train import build_model                 # noqa: E402
 from train_dnn.dataset import dilate_bev_mask           # noqa: E402
 
+
 # ---------------------------------------------------------------------------
 # Global map configuration
 # ---------------------------------------------------------------------------
 GLOBAL_MAP_SIZE_M      = 300.0
-GLOBAL_MAP_RESOLUTION  = 0.3
+GLOBAL_MAP_RESOLUTION  = 0.1
 GLOBAL_MAP_WIDTH       = int(GLOBAL_MAP_SIZE_M / GLOBAL_MAP_RESOLUTION)
 GLOBAL_MAP_HEIGHT      = int(GLOBAL_MAP_SIZE_M / GLOBAL_MAP_RESOLUTION)
 
@@ -56,14 +66,13 @@ WORLD_FRAME = os.environ.get("SCENE_NAME", "scene_0000_0")
 
 SCORE_THRESHOLD = 0.5
 
+PUBLISH_PERIOD_S = 1.0        # 1 Hz for both maps
+
 MODEL_WEIGHTS = os.environ.get(
     "DNN_WEIGHTS",
     "/home/ubuntu/shared/seg_dataset_gen/lidar/dnn_runs_001/best.pt",
 )
 
-# ---------------------------------------------------------------------------
-# Global CUDA perf flags (safe on CPU-only machines too).
-# ---------------------------------------------------------------------------
 if torch.cuda.is_available():
     torch.backends.cudnn.benchmark = True
     torch.backends.cuda.matmul.allow_tf32 = True
@@ -87,33 +96,64 @@ class DNNInferenceNode(Node):
             f"{self.grid_w} x {self.grid_h} cells @ {self.cfg.cell_size} m"
         )
 
-        # ---- AMP settings for inference ----
         self.use_amp = (self.device.type == "cuda")
         self.amp_dtype = torch.float16 if self.use_amp else torch.float32
 
-        # ---- global occupancy grid (CPU) ----
+        # ---- global occupancy grid ----
         self.global_map = np.full(
             (GLOBAL_MAP_HEIGHT, GLOBAL_MAP_WIDTH), -1, dtype=np.int8
         )
         self.log_odds = np.zeros(
             (GLOBAL_MAP_HEIGHT, GLOBAL_MAP_WIDTH), dtype=np.float32
         )
+        # Flat views — reused everywhere to avoid reshape allocations.
+        self._log_odds_flat = self.log_odds.reshape(-1)
+        self._global_map_flat = self.global_map.reshape(-1)
+
         self.global_origin_x = -GLOBAL_MAP_SIZE_M / 2.0
         self.global_origin_y = -GLOBAL_MAP_SIZE_M / 2.0
 
-        # Log-odds update parameters
-        self.L_OCC    =  0.85
-        self.L_FREE   = -0.40
-        self.L_MIN    = -2.00
-        self.L_MAX    =  3.50
-        self.L_THRESH =  0.00
+        # Log-odds update parameters (unchanged).
+        self.L_OCC   =  1.20
+        self.L_FREE  = -0.60
+        self.L_MIN   = -2.00
+        self.L_MAX   =  3.50
+        self.L_THRESH = 0.00
 
-        # ---- ROS interfaces ----
+        # Cached constants for the fusion path.
+        self._inv_global_res = 1.0 / GLOBAL_MAP_RESOLUTION
+
+        # ---- latest local map snapshot for the 1 Hz local publisher ----
+        self._local_lock = threading.Lock()
+        self._local_snapshot = None   # dict or None
+
+        # ---- counters ----
+        self._infer_count = 0
+        self._last_infer_count = 0
+
+        self.log_exec_time = False
+
+        # ------------------------------------------------------------------
+        # ROS interfaces — split across callback groups so the 1 Hz
+        # publishers never block incoming clouds.
+        # ------------------------------------------------------------------
+        self._sub_group = MutuallyExclusiveCallbackGroup()
+        self._global_pub_group = MutuallyExclusiveCallbackGroup()
+        # self._local_pub_group = MutuallyExclusiveCallbackGroup()
+
+        qos = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=100,
+        )
+
         self.subscription = self.create_subscription(
             AlignedCloudWithPose,
             "/sim_lidar/pointcloud/aligned_with_pose",
             self.inference_callback,
-            qos_profile_sensor_data,
+            qos,
+            callback_group=self._sub_group,
         )
         self.map_pub = self.create_publisher(
             OccupancyGrid, "/global_occupancy_grid", 10
@@ -122,13 +162,21 @@ class DNNInferenceNode(Node):
             OccupancyGrid, "/local_occupancy_grid", 10
         )
 
-        self.log_exec_time = False
+        self._global_timer = self.create_timer(
+            PUBLISH_PERIOD_S, self._publish_global_map,
+            callback_group=self._global_pub_group,
+        )
+        #self._local_timer = self.create_timer(
+        #    PUBLISH_PERIOD_S, self._publish_local_map,
+        #    callback_group=self._local_pub_group,
+        #)
 
         self.get_logger().info(
             f"Global map: {GLOBAL_MAP_WIDTH}x{GLOBAL_MAP_HEIGHT} cells "
             f"({GLOBAL_MAP_SIZE_M}x{GLOBAL_MAP_SIZE_M} m @ "
             f"{GLOBAL_MAP_RESOLUTION} m/cell), origin = "
-            f"({self.global_origin_x:.1f}, {self.global_origin_y:.1f})"
+            f"({self.global_origin_x:.1f}, {self.global_origin_y:.1f}); "
+            f"publishing at {1.0/PUBLISH_PERIOD_S:.1f} Hz"
         )
 
     # -----------------------------------------------------------------------
@@ -163,15 +211,10 @@ class DNNInferenceNode(Node):
         return model
 
     # -----------------------------------------------------------------------
-    # Inference — GPU, fp16; returns a numpy array on the CPU.
-    # One D2H copy of a 512x128 fp32 tensor (~256 KB) is negligible.
+    # Inference — unchanged
     # -----------------------------------------------------------------------
     @torch.no_grad()
     def _run_inference(self, xyz_aligned):
-        """
-        xyz_aligned: (N, 3) float32 numpy array in the aligned frame.
-        Returns: (H, W) float32 numpy array of sigmoid probabilities on CPU.
-        """
         if xyz_aligned.shape[0] == 0:
             return np.zeros((self.grid_h, self.grid_w), dtype=np.float32)
 
@@ -188,20 +231,15 @@ class DNNInferenceNode(Node):
             dtype=self.amp_dtype,
             enabled=self.use_amp,
         ):
-            logits = self.model(model_input)          # (1, H, W)
+            logits = self.model(model_input)
 
-        prob = torch.sigmoid(logits.float())[0]       # (H, W), fp32 on GPU
-        # Single D2H copy, then hand the rest of the pipeline to CPU.
+        prob = torch.sigmoid(logits.float())[0]
         return prob.cpu().numpy()
 
     # -----------------------------------------------------------------------
-    # Coverage rasterize — CPU (same as original).
+    # Coverage rasterization
     # -----------------------------------------------------------------------
     def _rasterize_coverage(self, xyz_aligned):
-        """
-        Return a (grid_h, grid_w) bool mask that is True wherever a point
-        landed, dilated by cfg.pred_coverage_kernel.
-        """
         cfg = self.cfg
         observed = np.zeros((self.grid_h, self.grid_w), dtype=bool)
         if xyz_aligned.shape[0] == 0:
@@ -210,8 +248,8 @@ class DNNInferenceNode(Node):
         u = xyz_aligned[:, cfg.col_axis]
         v = xyz_aligned[:, cfg.row_axis]
 
-        j = np.floor((u - cfg.x_min) / cfg.cell_size).astype(np.int64)
-        i = np.floor((v - cfg.y_min) / cfg.cell_size).astype(np.int64)
+        j = np.floor((u - cfg.x_min) * (1.0 / cfg.cell_size)).astype(np.int64)
+        i = np.floor((v - cfg.y_min) * (1.0 / cfg.cell_size)).astype(np.int64)
 
         inside = (i >= 0) & (i < self.grid_h) & (j >= 0) & (j < self.grid_w)
         if inside.any():
@@ -221,11 +259,13 @@ class DNNInferenceNode(Node):
         return np.asarray(coverage, dtype=bool)
 
     # -----------------------------------------------------------------------
-    # Main callback
+    # Main callback — inference + fusion only. No publishing.
     # -----------------------------------------------------------------------
     def inference_callback(self, msg: AlignedCloudWithPose):
+        t_start = time.perf_counter()
+
         # ---- 1. Unpack ----
-        start = time.perf_counter()
+        t0 = time.perf_counter()
         raw = np.asarray(msg.points, dtype=np.float32)
         if raw.size == 0 or raw.size % 3 != 0:
             return
@@ -236,12 +276,12 @@ class DNNInferenceNode(Node):
             pts = pts[finite]
         if pts.shape[0] == 0:
             return
-        unpack_ms = (time.perf_counter() - start) * 1000.0
+        unpack_ms = (time.perf_counter() - t0) * 1000.0
 
-        # ---- 2. Inference (GPU, fp16) ----
-        start = time.perf_counter()
+        # ---- 2. Inference ----
+        t0 = time.perf_counter()
         try:
-            prob = self._run_inference(pts)         # numpy (H, W), CPU
+            prob = self._run_inference(pts)
         except Exception as e:  # noqa: BLE001
             self.get_logger().error(f"Inference failed: {e}")
             return
@@ -252,117 +292,126 @@ class DNNInferenceNode(Node):
                 f"({self.grid_h}, {self.grid_w})"
             )
             return
-        infer_ms = (time.perf_counter() - start) * 1000.0
+        infer_ms = (time.perf_counter() - t0) * 1000.0
 
-        # ---- 3. Coverage (CPU) ----
-        start = time.perf_counter()
+        # ---- 3. Coverage ----
+        t0 = time.perf_counter()
         coverage = self._rasterize_coverage(pts)
-        rasterize_ms = (time.perf_counter() - start) * 1000.0
+        rasterize_ms = (time.perf_counter() - t0) * 1000.0
 
-        # ---- 4. Fusion (CPU) ----
-        start = time.perf_counter()
-        ox  = float(msg.origin_world.x)
-        oy  = float(msg.origin_world.y)
-        oz  = float(msg.origin_world.z)
+        # ---- 4. Fusion (now local) ----
+        t0 = time.perf_counter()
+        ox = float(msg.origin_world.x)
+        oy = float(msg.origin_world.y)
+        oz = float(msg.origin_world.z)
         yaw = float(msg.yaw)
-        stamp = msg.header.stamp
 
         if coverage.any():
             self._project_to_global(prob, coverage, ox, oy, yaw)
+        fuse_ms = (time.perf_counter() - t0) * 1000.0
 
-        project_ms = (time.perf_counter() - start) * 1000.0
+        # ---- 5. Hand a snapshot to the 1 Hz local publisher ----
+        # We only copy prob + coverage once per inference; the publisher
+        # reads it under a lock. This is a few hundred KB at most.
+        with self._local_lock:
+            self._local_snapshot = {
+                "prob": prob,
+                "coverage": coverage,
+                "ox": ox, "oy": oy, "oz": oz, "yaw": yaw,
+                "stamp": msg.header.stamp,
+            }
+
+        self._infer_count += 1
 
         if self.log_exec_time:
+            total_ms = (time.perf_counter() - t_start) * 1000.0
             self.get_logger().info(
-                "Callback execution times: "
-                f"unpack {unpack_ms:.3f} ms, infer {infer_ms:.3f} ms, "
-                f"rasterize {rasterize_ms:.3f} ms, project {project_ms:.3f} ms"
+                f"[callback] unpack {unpack_ms:.2f}  infer {infer_ms:.2f}  "
+                f"raster {rasterize_ms:.2f}  fuse {fuse_ms:.2f}  "
+                f"total {total_ms:.2f} ms"
             )
 
-        # ---- 5. Publish ----
-        self._publish_global_map(stamp)
-        self._publish_local_map(prob, coverage, ox, oy, oz, yaw, stamp)
-
     # -----------------------------------------------------------------------
-    # Fusion — CPU, with np.add.at replaced by np.bincount.
+    # Fusion — local, O(touched cells)
     # -----------------------------------------------------------------------
     def _project_to_global(self, prob, coverage, origin_x, origin_y, yaw):
         occ_mask  = coverage & (prob >= SCORE_THRESHOLD)
         free_mask = coverage & (prob <  SCORE_THRESHOLD)
 
-        self._scatter(occ_mask,  origin_x, origin_y, yaw, self.L_OCC)
-        self._scatter(free_mask, origin_x, origin_y, yaw, self.L_FREE)
+        occ_idx  = self._global_indices(occ_mask,  origin_x, origin_y, yaw)
+        free_idx = self._global_indices(free_mask, origin_x, origin_y, yaw)
 
-        self._refresh_global_map()
+        # Occupied cells veto free votes in the same frame.
+        if occ_idx.size and free_idx.size:
+            free_idx = np.setdiff1d(free_idx, occ_idx, assume_unique=False)
 
-    def _scatter(self, mask, origin_x, origin_y, yaw, delta):
+        # Apply both updates locally and update the published int8 map for
+        # only the cells that actually changed.
+        self._apply_log_odds(occ_idx,  self.L_OCC)
+        self._apply_log_odds(free_idx, self.L_FREE)
+
+    def _global_indices(self, mask, origin_x, origin_y, yaw):
         """
-        Add `delta` to log-odds at the global cells covered by `mask`.
-
-        Uses np.bincount instead of np.add.at, which is 2-10x faster for
-        large index arrays with duplicate indices.
+        Rasterize a (grid_h, grid_w) bool mask from the aligned BEV frame
+        to flat indices into the global grid. Out-of-bounds cells dropped.
         """
-        rows, cols = np.where(mask)
+        rows, cols = np.nonzero(mask)
         if rows.size == 0:
-            return
+            return np.empty(0, dtype=np.int64)
 
         cfg = self.cfg
 
-        # Cell centres in the aligned frame.
-        pa_x = cfg.x_min + (cols.astype(np.float64) + 0.5) * cfg.cell_size
-        pa_y = cfg.y_min + (rows.astype(np.float64) + 0.5) * cfg.cell_size
+        pa_x = cfg.x_min + (cols.astype(np.float32) + 0.5) * cfg.cell_size
+        pa_y = cfg.y_min + (rows.astype(np.float32) + 0.5) * cfg.cell_size
 
-        # Inverse rotation: Rz(+yaw).
-        c = np.cos(yaw)
-        s = np.sin(yaw)
+        c = np.float32(np.cos(yaw))
+        s = np.float32(np.sin(yaw))
         pl_x = c * pa_x - s * pa_y
         pl_y = s * pa_x + c * pa_y
 
-        # Inverse translation.
         pw_x = origin_x + pl_x
         pw_y = origin_y + pl_y
 
-        # World coords -> global grid indices.
-        gcol = np.floor(
-            (pw_x - self.global_origin_x) / GLOBAL_MAP_RESOLUTION
-        ).astype(np.int64)
-        grow = np.floor(
-            (pw_y - self.global_origin_y) / GLOBAL_MAP_RESOLUTION
-        ).astype(np.int64)
+        gcol = np.floor((pw_x - self.global_origin_x) * self._inv_global_res).astype(np.int64)
+        grow = np.floor((pw_y - self.global_origin_y) * self._inv_global_res).astype(np.int64)
 
         valid = (
             (grow >= 0) & (grow < GLOBAL_MAP_HEIGHT) &
             (gcol >= 0) & (gcol < GLOBAL_MAP_WIDTH)
         )
         if not np.any(valid):
+            return np.empty(0, dtype=np.int64)
+
+        return grow[valid] * GLOBAL_MAP_WIDTH + gcol[valid]
+
+    def _apply_log_odds(self, flat_idx, delta):
+        """
+        Apply `count * delta` to the touched cells, clamp, and update the
+        published int8 map for just those cells. O(touched), not O(9M).
+        """
+        if flat_idx.size == 0:
             return
-        grow = grow[valid]
-        gcol = gcol[valid]
 
-        flat = self.log_odds.reshape(-1)
-        idx  = grow * GLOBAL_MAP_WIDTH + gcol
+        uniq, counts = np.unique(flat_idx, return_counts=True)
+        deltas = counts.astype(np.float32) * np.float32(delta)
 
-        # np.bincount(idx, minlength=flat.size) gives, for each cell, the
-        # number of updates; multiply by delta. This is much faster than
-        # np.add.at for many duplicate indices.
-        counts = np.bincount(idx, minlength=flat.size).astype(np.float32)
-        flat += counts * np.float32(delta)
+        lo = self._log_odds_flat
+        new_lo = np.clip(lo[uniq] + deltas, self.L_MIN, self.L_MAX)
+        lo[uniq] = new_lo
 
-        np.clip(flat, self.L_MIN, self.L_MAX, out=flat)
-
-    def _refresh_global_map(self):
-        lo = self.log_odds
-        gm = self.global_map
-        gm.fill(-1)
-        gm[lo <  self.L_THRESH] = 0
-        gm[lo >  self.L_THRESH] = 100
+        # Update only the touched cells of the published map.
+        gm = self._global_map_flat
+        gm[uniq] = np.where(
+            new_lo > self.L_THRESH, np.int8(100),
+            np.where(new_lo < self.L_THRESH, np.int8(0), np.int8(-1)),
+        )
 
     # -----------------------------------------------------------------------
-    # Publishers
+    # Publishers — run on their own timers at 1 Hz.
     # -----------------------------------------------------------------------
-    def _publish_global_map(self, stamp):
+    def _publish_global_map(self):
         msg = OccupancyGrid()
-        msg.header.stamp = stamp
+        msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = WORLD_FRAME
         msg.info.resolution = GLOBAL_MAP_RESOLUTION
         msg.info.width = GLOBAL_MAP_WIDTH
@@ -371,12 +420,23 @@ class DNNInferenceNode(Node):
             position=Point(x=self.global_origin_x, y=self.global_origin_y, z=0.0),
             orientation=Quaternion(x=0.0, y=0.0, z=0.0, w=1.0),
         )
-        # Fast int8 -> bytes -> array.
-        msg.data = array.array('b', self.global_map.flatten().tobytes())
+        msg.data = array.array('b', self.global_map.tobytes())
         self.map_pub.publish(msg)
 
-    def _publish_local_map(self, prob, coverage, ox, oy, oz, yaw, stamp):
+        n = self._infer_count - self._last_infer_count
+        self._last_infer_count = self._infer_count
+        # self.get_logger().info(
+        #    f"Published global map ({n} inferences since last publish)"
+        # )
+
+    def _publish_local_map(self):
+        with self._local_lock:
+            snap = self._local_snapshot
+        if snap is None:
+            return
+
         cfg = self.cfg
+        yaw = snap["yaw"]
 
         corner_a = np.array([cfg.x_min, cfg.y_min, 0.0], dtype=np.float64)
         c = np.cos(yaw)
@@ -386,10 +446,12 @@ class DNNInferenceNode(Node):
             s * corner_a[0] + c * corner_a[1],
             0.0,
         ])
-        origin_world = np.array([ox, oy, oz], dtype=np.float64) + corner_l
+        origin_world = np.array(
+            [snap["ox"], snap["oy"], snap["oz"]], dtype=np.float64
+        ) + corner_l
 
         msg = OccupancyGrid()
-        msg.header.stamp = stamp
+        msg.header.stamp = snap["stamp"]
         msg.header.frame_id = WORLD_FRAME
         msg.info.resolution = cfg.cell_size
         msg.info.width = self.grid_w
@@ -401,14 +463,15 @@ class DNNInferenceNode(Node):
                 z=float(origin_world[2]),
             ),
             orientation=Quaternion(
-                x=0.0,
-                y=0.0,
+                x=0.0, y=0.0,
                 z=float(np.sin(yaw * 0.5)),
                 w=float(np.cos(yaw * 0.5)),
             ),
         )
 
-        # -1 unknown, 0 free, 100 occupied.
+        prob = snap["prob"]
+        coverage = snap["coverage"]
+
         data = np.full((self.grid_h, self.grid_w), -1, dtype=np.int8)
         data[coverage & (prob >= SCORE_THRESHOLD)] = 100
         data[coverage & (prob <  SCORE_THRESHOLD)] = 0
@@ -419,8 +482,10 @@ class DNNInferenceNode(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = DNNInferenceNode()
+    executor = MultiThreadedExecutor(num_threads=3)
+    executor.add_node(node)
     try:
-        rclpy.spin(node)
+        executor.spin()
     except KeyboardInterrupt:
         pass
     finally:

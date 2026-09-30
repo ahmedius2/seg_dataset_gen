@@ -19,10 +19,12 @@ def generate_random_seed(string):
     return hash(string) % (2**32)
 
 # Define output file and command
-if len(sys.argv) < 3 or sys.argv[2] not in ("takeoff", "mission"):
-    print("Usage: python collect_data.py <run_directory> <takeoff|mission>")
+if len(sys.argv) < 3 or sys.argv[2] not in ("takeoff", "mission", "mission_norotate"):
+    print("Usage: python collect_data.py <run_directory> <takeoff|mission|mission_norotate>")
     print("  takeoff : connect, arm, take off, and navigate to the scan start position, then exit")
     print("  mission : connect to the already-flying vehicle, run the scan pattern, RTL, then exit")
+    print("  mission_norotate : connect to the already-flying vehicle, run the"
+          " scan pattern without random rotations, RTL, then exit")
     sys.exit(1)
 
 RUN_DIR = sys.argv[1]
@@ -203,11 +205,15 @@ if __name__ == '__main__':
             print("\nTakeoff phase complete. Vehicle is holding at the scan start position.")
             print("You can now start rosbag recording, then run this script again with the 'mission' phase.")
 
-        elif PHASE == "mission":
+        elif PHASE == "mission" or PHASE == "mission_norotate":
             # --- PHASE 2: Run the scan pattern and RTL ---
             # Generate scan plan waypoints
-            random_rotate_angle = random.Random(RANDOM_SEED).uniform(0, 30)
-            print(f"Random rotation angle: {random_rotate_angle:.1f}°")
+            if PHASE == "mission_norotate":
+                random_rotate_angle = 0.0
+                print(f"Random rotation angle: {random_rotate_angle:.1f}° (No rotation)")
+            else:
+                random_rotate_angle = random.Random(RANDOM_SEED).uniform(0, 30)
+                print(f"Random rotation angle: {random_rotate_angle:.1f}°")
             scan_waypoints = generate_rotated_scan_path(CORNERS, SWATH_WIDTH, random_rotate_angle)
             print(f"\nGenerated scan path with {len(scan_waypoints)} waypoints.")
 

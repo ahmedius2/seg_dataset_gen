@@ -1,13 +1,30 @@
 #!/bin/bash
 
+# run with EXEC_MODE=test to do a testing session with dnn
+
+EXEC_MODE="${EXEC_MODE:-dataset_gen}"  # or test
 SCENE_NAME="${SCENE_NAME:-scene_0000_0}"
 RUN_DIR="${HOME}/shared/simulation_data/${SCENE_NAME}"
+MODEL_SDF_DIR=${ROS_WORKSPACE}/src/copter_lidar_gzsim/models/iris_with_lidar
 
-# check if directory is already created with bag recording
-if [ -d "${RUN_DIR}/bag_recording" ]; then
-    echo "Skipping ${RUN_DIR}"
-    exit 0
+export SCENE_NAME=${SCENE_NAME}
+
+if [[ "${EXEC_MODE}" == "dataset_gen" ]]; then
+    # check if directory is already created with bag recording
+    if [[ -d "${RUN_DIR}/bag_recording" ]]; then
+        echo "Skipping ${RUN_DIR}"
+        exit 0
+    fi
+    LIDAR_HZ="2"
+else # test
+    rm -rf ${RUN_DIR}/*log ${RUN_DIR}/logs
+    LIDAR_HZ="10"
 fi
+
+pushd $MODEL_SDF_DIR
+rm -f model.sdf # remove the existing symbolic link
+ln -s model_${LIDAR_HZ}hz.sdf model.sdf
+popd
 
 echo "Running simulation for $SCENE_NAME..."
 
@@ -74,8 +91,13 @@ run_job "$RUN_DIR/topic_throttle.log" ros2 run topic_tools throttle messages /tf
 sleep 120  # wait for initialization
 printf "Waited 120 seconds for initialization, starting to takeoff.\n"
 python $CUR_PWD/collect_data.py $RUN_DIR takeoff
-run_job "$RUN_DIR/rosbag.log" ros2 bag record --use-sim-time -o "$RUN_DIR/bag_recording" \
-        --topics /sim_lidar/pointcloud/downsampled /tf_throttled
+if [[ "${EXEC_MODE}" == "dataset_gen" ]]; then
+    run_job "$RUN_DIR/rosbag.log" ros2 bag record --use-sim-time -o "$RUN_DIR/bag_recording" \
+            --topics /sim_lidar/pointcloud/downsampled /tf_throttled
+    RECORD="true"
+else
+    RECORD="false"
+fi
 
 output_dir="${HOME}/shared/dnn_dataset/${SCENE_NAME}"
 mkdir -p $output_dir
@@ -83,18 +105,27 @@ run_job "$RUN_DIR/pc_transform.log" ros2 launch pc_transform_cpp pc_transform.la
         world_frame:=${SCENE_NAME} \
         use_sim_time:=true \
         output_dir:=${output_dir} \
-        save_clouds:=true \
-        save_poses:=true
-python $CUR_PWD/collect_data.py $RUN_DIR mission
+        save_clouds:=${RECORD} \
+        save_poses:=${RECORD}
+
+if [[ "${EXEC_MODE}" == "dataset_gen" ]]; then
+    python $CUR_PWD/collect_data.py $RUN_DIR mission
+else # test
+    run_job "$RUN_DIR/ros2_dnn_infer.log" python $CUR_PWD/../lidar/train_dnn/ros2_infer.py
+    python $CUR_PWD/collect_data.py $RUN_DIR mission_norotate
+fi
 
 popd
-cleanup
 
 # check if ${RUN_DIR}/bag_recording exists, if not, exit with error code 1
-if [ ! -d "${RUN_DIR}/bag_recording" ]; then
-    echo "Error: ${RUN_DIR}/bag_recording does not exist. Simulation failed."
-    exit 1
-else
-    echo "Simulation completed successfully. Bag recording is available at: ${RUN_DIR}/bag_recording"
-    exit 0
+if [[ ${EXEC_MODE} == "dataset_gen" ]]; then
+    if [ ! -d "${RUN_DIR}/bag_recording" ]; then
+        echo "Error: ${RUN_DIR}/bag_recording does not exist. Simulation failed."
+        exit 1
+    else
+        echo "Simulation completed successfully. Bag recording is available at: ${RUN_DIR}/bag_recording"
+        exit 0
+    fi
 fi
+
+cleanup

@@ -15,7 +15,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 from .config import Config
 from .dataset import (BEVOccupancyDataset, collate_fn, dilate_bev_mask,
-                      discover_files, split_files)
+                      discover_files, scene_key, split_files)
 from .losses import build_loss
 from .metrics import average_precision, confusion_counts, metrics_from_counts
 
@@ -23,6 +23,8 @@ from .model.dynamic_pillars import DynamicPillarVFE
 from .model.pillar_scatter import PointPillarScatter
 from .model.base_bev_backbone import BaseBEVBackbone
 from .model.centerhead import CenterHead
+from .model.lite_backbone import LiteBEVNet
+from .model.height_encoder import HeightMapEncoder, HeightMapModel
 
 # --------------------------------------------------------------------------- #
 #  Model factory -- replace the body with your pillar backbone
@@ -54,10 +56,19 @@ def build_model(cfg: Config):
     Output must be raw logits, not probabilities.
     """
 
+    if cfg.model_variant == "heightmap":
+        enc = HeightMapEncoder(cfg.x_min, cfg.y_min, cfg.cell_size,
+                               cfg.grid_w, cfg.grid_h, cfg.height_clip)
+        return HeightMapModel(enc, LiteBEVNet(in_ch=1))
+
     vfe = DynamicPillarVFE(model_cfg=cfg.vfe_config, num_point_features=cfg.num_point_features,
                            voxel_size=cfg.pillar_dims, grid_size=cfg.grid_size,
                            point_cloud_range=cfg.point_cloud_range)
     scatter = PointPillarScatter(model_cfg=cfg.scatter_config, grid_size=cfg.grid_size)
+    if cfg.model_variant == "lite":
+        backbone = LiteBEVNet(in_ch=cfg.scatter_config['NUM_BEV_FEATURES'])
+        return PillarBasedModel(vfe=vfe, scatter=scatter, backbone=backbone,
+                                head=torch.nn.Identity())
     backbone = BaseBEVBackbone(model_cfg=cfg.backbone_2d_config, input_channels=cfg.scatter_config['NUM_BEV_FEATURES'])
     head = CenterHead(input_channels=backbone.num_bev_features)
 
@@ -96,6 +107,21 @@ def build_loaders(cfg: Config):
     return train_loader, val_loader, test_loader
 
 
+def write_split_report(path, cfg: Config, loaders):
+    """Append the scenes (and frame counts) used per split to `path`."""
+    lines = [f"=== {time.strftime('%Y-%m-%d %H:%M:%S')} | data_root={cfg.data_root} "
+             f"split_seed={cfg.split_seed} split_by_scene={cfg.split_by_scene} ==="]
+    for name, loader in zip(("train", "val"), loaders):
+        files = loader.dataset.files
+        scenes = {}
+        for f in files:
+            scenes[scene_key(f, cfg)] = scenes.get(scene_key(f, cfg), 0) + 1
+        lines.append(f"[{name}] {len(scenes)} scenes, {len(files)} frames")
+        lines += [f"  {s}  ({n} frames)" for s, n in sorted(scenes.items())]
+    with open(path, "a") as fh:
+        fh.write("\n".join(lines) + "\n\n")
+
+
 def make_optimizer(model, cfg: Config):
     decay, no_decay = [], []
     for name, p in model.named_parameters():
@@ -128,7 +154,7 @@ def make_scheduler(optimizer, cfg: Config, steps_per_epoch: int):
 
 
 def run_epoch(model, loader, criterion, device, cfg, optimizer=None,
-              scaler=None, epoch=0, log_every=20):
+              scaler=None, epoch=0, log_every=20, scheduler=None):
     train = optimizer is not None
     model.train(train)
 
@@ -164,6 +190,9 @@ def run_epoch(model, loader, criterion, device, cfg, optimizer=None,
                         torch.nn.utils.clip_grad_norm_(model.parameters(),
                                                        cfg.grad_clip)
                     optimizer.step()
+
+            if train and scheduler is not None:
+                scheduler.step()
 
         total_loss += loss.item()
         n_batches += 1
@@ -282,9 +311,15 @@ def main():
     parser.add_argument("--config", default=None,
                         help="JSON config to load instead of defaults")
     parser.add_argument("--resume", default=None, help="checkpoint to resume")
+    parser.add_argument("--lite", action="store_true",
+                        help="train the embedded (TIDL-friendly) model")
+    parser.add_argument("--heightmap", action="store_true",
+                        help="train the lite net on a 1-channel max-height map")
     args = parser.parse_args()
 
-    cfg = Config.from_json(args.config) if args.config else Config()
+    cfg = Config.from_json(args.config) if args.config else (
+        Config.lite() if args.lite else
+        Config.heightmap() if args.heightmap else Config())
     if args.data: cfg.data_root = args.data
     if args.out: cfg.out_dir = args.out
     if args.epochs: cfg.epochs = args.epochs
@@ -308,6 +343,7 @@ def main():
     print(f"[device] {device}")
 
     train_loader, val_loader, _ = build_loaders(cfg)
+    write_split_report(out_dir / "splits.txt", cfg, (train_loader, val_loader))
 
     sample = next(iter(val_loader))
     valid_positive = int((sample[1] * sample[2]).sum().item())
@@ -324,6 +360,7 @@ def main():
 
     start_epoch = 0
     best_iou = -1.0
+    best_epoch = None
     if args.resume:
         ckpt = torch.load(args.resume, map_location=device, weights_only=False)
         model.load_state_dict(ckpt["model"])
@@ -337,18 +374,15 @@ def main():
         print(f"[resume] from {args.resume} at epoch {start_epoch}")
 
     history = []
+    ref_iou = best_iou  # last IoU that beat the previous reference by min_delta
+    stale_epochs = 0
     for epoch in range(start_epoch, cfg.epochs):
         t0 = time.time()
         tr = run_epoch(model, train_loader, criterion, device, cfg,
                        optimizer=optimizer, scaler=scaler, epoch=epoch,
-                       log_every=cfg.log_every)
-        if scheduler:
-            scheduler.step()
+                       log_every=cfg.log_every, scheduler=scheduler)
         va = run_epoch(model, val_loader, criterion, device, cfg,
                        optimizer=None, epoch=epoch, log_every=0)
-
-        save_validation_visualizations(model, val_loader, device, cfg, epoch,
-                          out_dir)
 
         print(f"epoch {epoch} ({time.time() - t0:.1f}s)")
         print("  " + format_stats("train", tr))
@@ -357,19 +391,34 @@ def main():
         history.append({"epoch": epoch, "train": tr, "val": va})
         (out_dir / "history.json").write_text(json.dumps(history, indent=2))
 
-        save_checkpoint(out_dir / "last.pt", model, optimizer, scheduler,
-                        scaler, epoch, best_iou, cfg)
         if va["iou"] > best_iou:
             best_iou = va["iou"]
+            best_epoch = epoch
             save_checkpoint(out_dir / "best.pt", model, optimizer, scheduler,
                             scaler, epoch, best_iou, cfg)
-            print(f"  new best val IoU {best_iou:.4f} -> best.pt")
+            print(f"  new best val IoU {best_iou:.4f} at epoch {epoch} -> best.pt")
+            save_validation_visualizations(model, val_loader, device, cfg, epoch,
+                            out_dir)
 
-        if cfg.save_every and (epoch + 1) % cfg.save_every == 0:
+        if va["iou"] > ref_iou + cfg.early_stop_min_delta:
+            ref_iou = va["iou"]
+            stale_epochs = 0
+        else:
+            stale_epochs += 1
+
+        save_checkpoint(out_dir / "last.pt", model, optimizer, scheduler,
+                        scaler, epoch, best_iou, cfg)
+
+        if (cfg.save_every and (epoch + 1) % cfg.save_every == 0):
             save_checkpoint(out_dir / f"epoch_{epoch:03d}.pt", model, optimizer,
                             scheduler, scaler, epoch, best_iou, cfg)
 
-    print(f"done. best val IoU = {best_iou:.4f}")
+        if cfg.early_stop_patience and stale_epochs >= cfg.early_stop_patience:
+            print(f"early stop: no val IoU gain > {cfg.early_stop_min_delta} "
+                  f"for {stale_epochs} epochs (best {best_iou:.4f})")
+            break
+
+    print(f"done. best val IoU = {best_iou:.4f} (epoch {best_epoch})")
 
 
 if __name__ == "__main__":

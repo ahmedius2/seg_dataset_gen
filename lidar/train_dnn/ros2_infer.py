@@ -19,9 +19,11 @@ import sys
 import time
 import array
 import threading
+import json
+from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
-import torch
 
 import rclpy
 from rclpy.node import Node
@@ -49,16 +51,14 @@ TRAIN_DNN_ROOT = os.environ.get(
 if TRAIN_DNN_ROOT not in sys.path:
     sys.path.insert(0, TRAIN_DNN_ROOT)
 
-from train_dnn.config import Config                     # noqa: E402
-from train_dnn.train import build_model                 # noqa: E402
-from train_dnn.dataset import dilate_bev_mask           # noqa: E402
+from train_dnn.bev_ops import dilate_bev_mask
 
 
 # ---------------------------------------------------------------------------
 # Global map configuration
 # ---------------------------------------------------------------------------
 GLOBAL_MAP_SIZE_M      = 300.0
-GLOBAL_MAP_RESOLUTION  = 0.1
+GLOBAL_MAP_RESOLUTION  = 0.2
 GLOBAL_MAP_WIDTH       = int(GLOBAL_MAP_SIZE_M / GLOBAL_MAP_RESOLUTION)
 GLOBAL_MAP_HEIGHT      = int(GLOBAL_MAP_SIZE_M / GLOBAL_MAP_RESOLUTION)
 
@@ -72,11 +72,7 @@ MODEL_WEIGHTS = os.environ.get(
     "DNN_WEIGHTS",
     "/home/ubuntu/shared/seg_dataset_gen/lidar/dnn_runs_001/best.pt",
 )
-
-if torch.cuda.is_available():
-    torch.backends.cudnn.benchmark = True
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.allow_tf32 = True
+INFERENCE_BACKEND = os.environ.get("DNN_BACKEND", "torch").lower()
 
 
 class DNNInferenceNode(Node):
@@ -84,10 +80,25 @@ class DNNInferenceNode(Node):
         super().__init__("dnn_inference_node")
 
         # ---- device + config + model ----
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.cfg = Config()
-        self.cfg.__post_init__()
-        self.model = self._load_model().to(self.device).eval()
+        self.backend = INFERENCE_BACKEND
+        if self.backend == "onnx":
+            self.model = self._load_onnx_model()
+            self.device = "CPU (ONNX Runtime)"
+            self.use_amp = False
+        elif self.backend == "torch":
+            import torch
+
+            self.torch = torch
+            if torch.cuda.is_available():
+                torch.backends.cudnn.benchmark = True
+                torch.backends.cuda.matmul.allow_tf32 = True
+                torch.backends.cudnn.allow_tf32 = True
+            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            self.model = self._load_torch_model().to(self.device).eval()
+            self.use_amp = self.device.type == "cuda"
+            self.amp_dtype = torch.float16 if self.use_amp else torch.float32
+        else:
+            raise ValueError("DNN_BACKEND must be 'torch' or 'onnx'")
 
         self.grid_h = self.cfg.grid_h
         self.grid_w = self.cfg.grid_w
@@ -95,9 +106,6 @@ class DNNInferenceNode(Node):
             f"Model loaded on {self.device}; BEV grid = "
             f"{self.grid_w} x {self.grid_h} cells @ {self.cfg.cell_size} m"
         )
-
-        self.use_amp = (self.device.type == "cuda")
-        self.amp_dtype = torch.float16 if self.use_amp else torch.float32
 
         # ---- global occupancy grid ----
         self.global_map = np.full(
@@ -182,7 +190,11 @@ class DNNInferenceNode(Node):
     # -----------------------------------------------------------------------
     # Model loading (unchanged)
     # -----------------------------------------------------------------------
-    def _load_model(self):
+    def _load_torch_model(self):
+        import torch
+        from train_dnn.config import Config
+        from train_dnn.train import build_model
+
         if not os.path.isfile(MODEL_WEIGHTS):
             raise FileNotFoundError(
                 f"DNN weights not found at {MODEL_WEIGHTS}. "
@@ -210,14 +222,43 @@ class DNNInferenceNode(Node):
         model.load_state_dict(state_dict, strict=True)
         return model
 
+    def _load_onnx_model(self):
+        from train_dnn.onnx_runtime import OnnxRuntimeModel
+
+        model_path_value = os.environ.get("DNN_ONNX_MODEL")
+        if not model_path_value:
+            raise ValueError("Set DNN_ONNX_MODEL to the exported bev_net.onnx")
+        model_path = Path(model_path_value)
+        if not model_path.is_file():
+            raise FileNotFoundError(f"ONNX model not found: {model_path}")
+        export_dir = model_path.parent
+        config_path = Path(os.environ.get("DNN_CONFIG", export_dir / "config.json"))
+        encoder_path = Path(os.environ.get("DNN_ENCODER", export_dir / "pillar_vfe.npz"))
+        for path in (config_path, encoder_path):
+            if not path.is_file():
+                raise FileNotFoundError(f"ONNX runtime asset not found: {path}")
+
+        with config_path.open() as stream:
+            config = json.load(stream)
+        if config.get("model_variant") not in ("lite", "heightmap"):
+            raise ValueError("ONNX backend requires a lite or heightmap export")
+        self.cfg = SimpleNamespace(**config)
+        self.cfg.grid_w = int(round((self.cfg.x_max - self.cfg.x_min) / self.cfg.cell_size))
+        self.cfg.grid_h = int(round((self.cfg.y_max - self.cfg.y_min) / self.cfg.cell_size))
+        self.get_logger().info(f"Loading CPU ONNX model from {model_path}")
+        return OnnxRuntimeModel(model_path, encoder_path, self.cfg.model_variant)
+
     # -----------------------------------------------------------------------
     # Inference — unchanged
     # -----------------------------------------------------------------------
-    @torch.no_grad()
     def _run_inference(self, xyz_aligned):
         if xyz_aligned.shape[0] == 0:
             return np.zeros((self.grid_h, self.grid_w), dtype=np.float32)
 
+        if self.backend == "onnx":
+            return self.model(xyz_aligned)
+
+        torch = self.torch
         pts = torch.as_tensor(
             xyz_aligned, dtype=torch.float32, device=self.device
         )

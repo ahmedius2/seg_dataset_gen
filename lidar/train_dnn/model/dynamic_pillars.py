@@ -93,9 +93,10 @@ class DynamicPillarVFE(VFETemplate):
         self.scale_xy = grid_size[0] * grid_size[1]
         self.scale_y = grid_size[1]
 
-        self.grid_size = torch.tensor(grid_size).cuda()
-        self.voxel_size = torch.tensor(voxel_size).cuda()
-        self.point_cloud_range = torch.tensor(point_cloud_range).cuda()
+        # Non-persistent so old checkpoints still load; follows .to(device).
+        self.register_buffer("grid_size", torch.tensor(grid_size), persistent=False)
+        self.register_buffer("voxel_size", torch.tensor(voxel_size), persistent=False)
+        self.register_buffer("point_cloud_range", torch.tensor(point_cloud_range), persistent=False)
 
     def get_output_feature_dim(self):
         return self.num_filters[-1]

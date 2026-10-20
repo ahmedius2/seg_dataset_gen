@@ -6,9 +6,9 @@ from typing import Any
 import numpy as np
 import torch
 from torch.utils.data import Dataset
-import torch.nn.functional as F
 
 from .config import Config
+from .bev_ops import dilate_bev_mask
 
 
 # --------------------------------------------------------------------------- #
@@ -144,19 +144,6 @@ def rasterize_occupancy(xyz, intensity, cfg: Config):
 
     return occ, observed
 
-
-def dilate_bev_mask(mask, kernel_size=11):
-    """Max-pool a BEV mask so nearby empty cells are treated as covered."""
-    if kernel_size is None or kernel_size <= 1:
-        return mask
-    tensor = torch.from_numpy(np.asarray(mask, dtype=np.float32))
-    tensor = tensor.unsqueeze(0).unsqueeze(0)
-    pad = kernel_size // 2
-    tensor = F.max_pool2d(tensor, kernel_size=kernel_size, stride=1, padding=pad)
-    out = tensor.squeeze().numpy()
-    if np.asarray(mask).dtype == bool:
-        return out > 0.5
-    return out.astype(np.float32)
 
 # --------------------------------------------------------------------------- #
 #  Dataset

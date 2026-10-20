@@ -3,7 +3,7 @@
 # run with EXEC_MODE=test to do a testing session with dnn
 
 EXEC_MODE="${EXEC_MODE:-dataset_gen}"  # or test
-SCENE_NAME="${SCENE_NAME:-scene_0000_0}"
+SCENE_NAME="${SCENE_NAME:-scene_0012_0}"
 RUN_DIR="${HOME}/shared/simulation_data/${SCENE_NAME}"
 MODEL_SDF_DIR=${ROS_WORKSPACE}/src/copter_lidar_gzsim/models/iris_with_lidar
 
@@ -111,6 +111,8 @@ run_job "$RUN_DIR/pc_transform.log" ros2 launch pc_transform_cpp pc_transform.la
 if [[ "${EXEC_MODE}" == "dataset_gen" ]]; then
     python $CUR_PWD/collect_data.py $RUN_DIR mission
 else # test
+    #run_job "$RUN_DIR/ros2_dnn_infer.log" python $CUR_PWD/../lidar/train_dnn/ros2_infer.py
+    export DNN_BACKEND=onnx DNN_ONNX_MODEL=$(realpath $CUR_PWD/../lidar/dnn_runs_lite_2/onnx_export/bev_net.onnx)
     run_job "$RUN_DIR/ros2_dnn_infer.log" python $CUR_PWD/../lidar/train_dnn/ros2_infer.py
     python $CUR_PWD/collect_data.py $RUN_DIR mission_norotate
 fi

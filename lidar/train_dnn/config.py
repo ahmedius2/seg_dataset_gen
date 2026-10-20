@@ -43,9 +43,9 @@ class Config:
     z_min: float = -10.0 # ignore z, its using pillars
     z_max: float = 10.0
     point_cloud_range: list[float] = field(default_factory=lambda: [-6.4, -25.6, -10.0, 6.4, 25.6, 10.0])
-    cell_size: float = 0.1          # 0.1 m x 0.1 m = 0.01 m^2 per cell
+    cell_size: float = 0.2          # 0.2 m x 0.2 m = 0.04 m^2 per cell
     # z spans the full z range so every point falls into a single z pillar bucket
-    pillar_dims: list[float] = field(default_factory=lambda: [0.1, 0.1, 20.0])
+    pillar_dims: list[float] = field(default_factory=lambda: [0.2, 0.2, 20.0])
     # Which cloud axis feeds the grid column (j) and row (i). 0=x, 1=y, 2=z
     col_axis: int = 0
     row_axis: int = 1
@@ -70,7 +70,7 @@ class Config:
     aug_z_invert_prob: float = 0.5
 
     # ---- Optimization ----
-    epochs: int = 50
+    epochs: int = 100
     batch_size: int = 8
     lr: float = 2e-3
     weight_decay: float = 1e-4
@@ -97,6 +97,16 @@ class Config:
     # Dilate the LiDAR-hit mask when hiding unconstrained predictions.
     # Training still ignores only cells that received no points.
     pred_coverage_kernel: int = 11
+
+    # Stop when val IoU hasn't improved by min_delta for this many epochs (0 = off).
+    early_stop_patience: int = 10
+    early_stop_min_delta: float = 1e-3
+
+    # Heightmap variant: heights are clipped to +-height_clip metres before scaling.
+    height_clip: float = 5.0
+
+    # "full" = original OpenPCDet-style net, "lite" = TIDL/embedded-friendly net
+    model_variant: str = "full"
 
     # ---- Derived ----
     grid_h: int = field(init=False, default=0)
@@ -128,6 +138,26 @@ class Config:
             raise ValueError("col_axis and row_axis must differ")
 
         self.grid_size = [self.grid_w, self.grid_h, 1]
+
+        # Single source of truth: pillar geometry follows cell_size and the extents.
+        self.pillar_dims = [self.cell_size, self.cell_size, self.z_max - self.z_min]
+        self.point_cloud_range = [self.x_min, self.y_min, self.z_min,
+                                  self.x_max, self.y_max, self.z_max]
+
+    @classmethod
+    def lite(cls, **kw):
+        cfg = cls(model_variant="lite", **kw)
+        cfg.vfe_config = EasyDict({
+            "WITH_DISTANCE": False, "USE_ABSLOTE_XYZ": True,
+            "USE_NORM": True, "NUM_FILTERS": [32, 32]})
+        cfg.scatter_config = EasyDict({"NUM_BEV_FEATURES": 32})
+        return cfg
+
+    @classmethod
+    def heightmap(cls, **kw):
+        cfg = cls(model_variant="heightmap", **kw)
+        cfg.scatter_config = EasyDict({"NUM_BEV_FEATURES": 1})
+        return cfg
 
     def to_json(self, path):
         Path(path).write_text(json.dumps(asdict(self), indent=2))

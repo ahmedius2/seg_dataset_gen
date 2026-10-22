@@ -4,19 +4,59 @@ import collections.abc
 # Patch collections.MutableMapping for Python 3.10+ compatibility with DroneKit
 collections.MutableMapping = collections.abc.MutableMapping
 
+import hashlib
 import random
 import time
 import math
 import os
 import sys
-import time
+import xml.etree.ElementTree as ET
 import numpy as np
 from dronekit import connect, VehicleMode
 from pymavlink import mavutil
 
 def generate_random_seed(string):
     """Generate a random seed from a given string for reproducibility."""
-    return hash(string) % (2**32)
+    digest = hashlib.sha256(string.encode("utf-8")).digest()
+    return int.from_bytes(digest[:4], byteorder="big")
+
+def load_spawn_position(scene_name):
+    """Read the vehicle's world-frame spawn pose from the generated SDF."""
+    world_filename = f"{scene_name}.sdf"
+    search_dirs = [os.getcwd()]
+    search_dirs.extend(os.environ.get("GZ_SIM_RESOURCE_PATH", "").split(os.pathsep))
+    search_dirs.append(os.path.expanduser("~/shared/custom_worlds"))
+
+    world_path = next(
+        (os.path.join(directory, world_filename)
+         for directory in search_dirs
+         if directory and os.path.isfile(os.path.join(directory, world_filename))),
+        None,
+    )
+    if world_path is None:
+        raise FileNotFoundError(
+            f"Could not find {world_filename} in the current directory, GZ_SIM_RESOURCE_PATH, or ~/shared/custom_worlds"
+        )
+
+    root = ET.parse(world_path).getroot()
+    for include in root.iter("include"):
+        uri = include.findtext("uri", "").rstrip("/")
+        if uri.rsplit("/", 1)[-1] != "iris_with_lidar":
+            continue
+
+        pose = include.findtext("pose")
+        if pose is None:
+            raise ValueError(f"Vehicle include in {world_path} has no pose")
+        coordinates = pose.split()
+        if len(coordinates) < 3:
+            raise ValueError(f"Vehicle pose in {world_path} must contain x, y, and z")
+        return {
+            "x": float(coordinates[0]),
+            "y": float(coordinates[1]),
+            "z": float(coordinates[2]),
+        }
+
+    raise ValueError(f"No iris_with_lidar vehicle include found in {world_path}")
 
 # Define output file and command
 if len(sys.argv) < 3 or sys.argv[2] not in ("takeoff", "mission", "mission_norotate"):
@@ -38,17 +78,15 @@ SCENE_NAME = os.getenv('SCENE_NAME', 'scene_0000_0')
 RANDOM_SEED = generate_random_seed(SCENE_NAME)
 
 # --- 1. CONFIGURE SCANNING & SPAWN PARAMETERS ---
-CONNECTION_STRING = 'tcp:127.0.0.1:5762'  # SITL second connection
+CONNECTION_STRING = 'tcp:127.0.0.1:14551'  # connect to mavproxy
+RETRY_INTERVAL_SECONDS = 10
 
 TARGET_SPEED = 10.0  # m/s
-TARGET_ALTITUDE = 35.0  # m above ground (Gazebo Z)
+TARGET_REL_ALTITUDE = 35.0  # m above ground (Gazebo Z)
 
-# DRONE SPAWN POSITION IN GAZEBO (ENU)
-# Used as offset because ArduPilot sets Local (0,0,0) at spawn location
-SPAWN_POS = {'x': 150.0, 'y': 0.0, 'z': 1.0}
-
-# Target start position in absolute Gazebo ENU coordinates (X, Y, Z) in meters
-START_POS = {'x': 150.0, 'y': 0.0, 'z': TARGET_ALTITUDE} # The z here is the flying altitude for the scan pattern
+# The SDF pose is the stable ENU origin for ArduPilot's local NED frame.
+SPAWN_POS = load_spawn_position(SCENE_NAME)
+print(f"Vehicle Gazebo spawn position: {SPAWN_POS}")
 
 # Define area bounds centered at (0,0) in Gazebo ENU
 SCAN_AREA_SIZE = (150.0, 150.0)  # (width, height)
@@ -67,22 +105,30 @@ SWATH_WIDTH = 15.0  # Spacing between scan lines
 
 def gazebo_to_ned(x, y, z, spawn=SPAWN_POS):
     """
-    Converts absolute Gazebo ENU coordinates (X, Y, Z) to ArduPilot
-    Local NED coordinates relative to the vehicle's spawn location.
+    Convert absolute Gazebo ENU coordinates to local NED targets.
     """
-    rel_x = x - spawn['x']
-    rel_y = y - spawn['y']
-    rel_z = z - spawn['z']
-
-    north = float(rel_y)
-    east = float(rel_x)
-    down = float(-rel_z)
+    north = float(y) - spawn['y']
+    east = float(x) - spawn['x']
+    down = -(float(z) - spawn['z'])
     return north, east, down
 
 def set_speed(vehicle, speed):
     """Sets vehicle ground speed in GUIDED mode."""
     print(f"Setting ground speed to: {speed} m/s")
     vehicle.groundspeed = speed
+
+def connect_with_retry():
+    """Retry the MAVLink connection until the vehicle sends a heartbeat."""
+    while True:
+        try:
+            return connect(
+                CONNECTION_STRING,
+                wait_ready=False,
+                heartbeat_timeout=RETRY_INTERVAL_SECONDS,
+            )
+        except Exception as error:
+            print(f"Vehicle not available ({error}); retrying in {RETRY_INTERVAL_SECONDS} seconds.")
+            time.sleep(RETRY_INTERVAL_SECONDS)
 
 def goto_local_ned(vehicle, north, east, down):
     """Sends MAVLink position target command in LOCAL_NED frame."""
@@ -123,28 +169,60 @@ def arm_and_takeoff_local(vehicle, start_x, start_y, target_alt):
     """Arms vehicle, takes off to target height, and navigates to start position."""
     print("Performing pre-arm checks...")
     while not vehicle.is_armable:
-        time.sleep(1)
+        print(f"Vehicle not armable yet; checking again in {RETRY_INTERVAL_SECONDS} seconds.")
+        time.sleep(RETRY_INTERVAL_SECONDS)
 
     print("Setting mode to GUIDED...")
-    vehicle.mode = VehicleMode("GUIDED")
-    time.sleep(1)
+    while vehicle.mode.name != "GUIDED":
+        try:
+            vehicle.mode = VehicleMode("GUIDED")
+        except Exception as error:
+            print(f"Could not set GUIDED mode ({error}); retrying in {RETRY_INTERVAL_SECONDS} seconds.")
+        if vehicle.mode.name != "GUIDED":
+            time.sleep(RETRY_INTERVAL_SECONDS)
 
     print("Arming motors...")
-    vehicle.armed = True
     while not vehicle.armed:
-        time.sleep(0.5)
+        try:
+            vehicle.armed = True
+        except Exception as error:
+            print(f"Could not arm vehicle ({error}); retrying in {RETRY_INTERVAL_SECONDS} seconds.")
+        if not vehicle.armed:
+            time.sleep(RETRY_INTERVAL_SECONDS)
 
     # Takeoff height is relative to spawn height
     takeoff_height = target_alt - SPAWN_POS['z']
     print(f"Taking off to target height relative to spawn: {takeoff_height}m (Abs Z: {target_alt}m)")
-    vehicle.simple_takeoff(takeoff_height)
-
+    highest_altitude = vehicle.location.global_relative_frame.alt
+    last_progress_time = time.monotonic()
+    last_command_time = 0.0
+    takeoff_command_sent = False
     while True:
         curr_alt = vehicle.location.global_relative_frame.alt
-        if curr_alt >= takeoff_height * 0.95:
+        if curr_alt is not None and curr_alt >= takeoff_height * 0.95:
             print(f" Reached altitude: {curr_alt:.2f}m")
             break
-        time.sleep(0.5)
+
+        now = time.monotonic()
+        if curr_alt is not None and (
+            highest_altitude is None or curr_alt >= highest_altitude + 0.5
+        ):
+            highest_altitude = curr_alt
+            last_progress_time = now
+
+        stalled = now - last_progress_time >= RETRY_INTERVAL_SECONDS
+        retry_interval_elapsed = now - last_command_time >= RETRY_INTERVAL_SECONDS
+        if not takeoff_command_sent or (stalled and retry_interval_elapsed):
+            if takeoff_command_sent:
+                print(f"No altitude progress for {RETRY_INTERVAL_SECONDS} seconds; retrying takeoff.")
+            try:
+                vehicle.simple_takeoff(takeoff_height)
+                takeoff_command_sent = True
+            except Exception as error:
+                print(f"Takeoff command failed ({error}); retrying in {RETRY_INTERVAL_SECONDS} seconds.")
+            last_command_time = now
+
+        time.sleep(1)
 
     print(f"Navigating to initial start point: Gazebo X={start_x}, Y={start_y}")
     n, e, d = gazebo_to_ned(start_x, start_y, target_alt)
@@ -196,14 +274,19 @@ def generate_rotated_scan_path(corners, spacing, angle_degrees=0.0, pivot=None):
 
 # --- MAIN RUN SCRIPT ---
 if __name__ == '__main__':
-    print(f"Connecting to SITL on {CONNECTION_STRING}...")
-    vehicle = connect(CONNECTION_STRING, wait_ready=True)
+    print(f"Connecting to SITL on {CONNECTION_STRING} through mavproxy...")
+    vehicle = connect_with_retry()
 
     try:
         if PHASE == "takeoff":
             # --- PHASE 1: Arm, take off, and navigate to the scan start position ---
             set_speed(vehicle, TARGET_SPEED)
-            arm_and_takeoff_local(vehicle, START_POS['x'], START_POS['y'], START_POS['z'])
+            arm_and_takeoff_local(
+                vehicle,
+                SPAWN_POS['x'],
+                SPAWN_POS['y'],
+                SPAWN_POS['z'] + TARGET_REL_ALTITUDE,
+            )
             print("\nTakeoff phase complete. Vehicle is holding at the scan start position.")
             print("You can now start rosbag recording, then run this script again with the 'mission' phase.")
 
@@ -223,11 +306,12 @@ if __name__ == '__main__':
 
             # Execute Lawnmower Grid
             for i, (wx, wy) in enumerate(scan_waypoints):
-                # choose a new altitude randomly between TARGET_ALTITUDE and TARGET_ALTITUDE + 5.0 meters for each waypoint
-                new_altitude = random.Random(RANDOM_SEED + i).uniform(TARGET_ALTITUDE - 10.0, TARGET_ALTITUDE + 10.0)
-                print(f"\n[Leg {i+1}/{len(scan_waypoints)}] Navigating to Gazebo (X: {wx:.1f}, Y: {wy:.1f}, Z: {new_altitude:.1f})")
+                # Vary scan altitude by up to 10 m around the target relative altitude.
+                new_altitude = random.Random(RANDOM_SEED + i).uniform(TARGET_REL_ALTITUDE - 10.0, TARGET_REL_ALTITUDE + 10.0)
+                target_z = SPAWN_POS['z'] + new_altitude
+                print(f"\n[Leg {i+1}/{len(scan_waypoints)}] Navigating to Gazebo (X: {wx:.1f}, Y: {wy:.1f}, Z: {target_z:.1f})")
 
-                target_n, target_e, target_d = gazebo_to_ned(wx, wy, new_altitude)
+                target_n, target_e, target_d = gazebo_to_ned(wx, wy, target_z)
                 wait_to_reach_target(vehicle, target_n, target_e, target_d)
 
             print("\nScan pattern execution complete!")

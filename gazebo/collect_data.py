@@ -306,7 +306,10 @@ if __name__ == '__main__':
             # Execute Lawnmower Grid
             for i, (wx, wy) in enumerate(scan_waypoints):
                 # Vary scan altitude by up to 10 m around the target relative altitude.
-                new_altitude = random.Random(RANDOM_SEED + i).uniform(TARGET_REL_ALTITUDE - 10.0, TARGET_REL_ALTITUDE + 10.0)
+                if PHASE == "mission":
+                    new_altitude = random.Random(RANDOM_SEED + i).uniform(TARGET_REL_ALTITUDE - 10.0, TARGET_REL_ALTITUDE + 10.0)
+                else:
+                    new_altitude = TARGET_REL_ALTITUDE
                 target_z = SPAWN_POS['z'] + new_altitude
                 print(f"\n[Leg {i+1}/{len(scan_waypoints)}] Navigating to Gazebo (X: {wx:.1f}, Y: {wy:.1f}, Z: {target_z:.1f})")
 

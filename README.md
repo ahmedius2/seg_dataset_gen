@@ -40,7 +40,7 @@ Run training from the `lidar` directory:
 
 ```bash
 cd lidar
-python -m train_dnn.train --lite --out dnn_runs_lite
+python -m gnd_seg_dnn.train --lite --out dnn_runs_lite
 ```
 
 The command uses the lite model explicitly. Defaults include 100 epochs, batch size 8, a 2-epoch learning-rate warmup followed by cosine decay, and early stopping after 10 epochs without a validation IoU improvement greater than `0.001`.
@@ -48,7 +48,7 @@ The command uses the lite model explicitly. Defaults include 100 epochs, batch s
 Useful overrides:
 
 ```bash
-python -m train_dnn.train --lite \
+python -m gnd_seg_dnn.train --lite \
   --data /path/to/dnn_dataset \
   --out dnn_runs_lite \
   --epochs 100 \
@@ -70,7 +70,7 @@ The scene split is grouped by scene, so frames from one scene are not divided be
 Export the best checkpoint from the run directory. Use the actual numbered output directory if training selected one:
 
 ```bash
-python -m train_dnn.export_onnx \
+python -m gnd_seg_dnn.export_onnx \
   --ckpt dnn_runs_lite/best.pt \
   --out exports/lite
 ```
@@ -91,7 +91,7 @@ Install NumPy and ONNX Runtime in the inference environment, and source the ROS 
 cd lidar
 DNN_BACKEND=onnx \
 DNN_ONNX_MODEL=/path/to/exports/lite/bev_net.onnx \
-python -m train_dnn.ros2_infer
+python -m gnd_seg_dnn.ros2_infer
 ```
 
 By default, the node reads `config.json` and `pillar_vfe.npz` from the ONNX model's directory. Set `DNN_CONFIG` or `DNN_ENCODER` to override either path. This backend uses ONNX Runtime's `CPUExecutionProvider`; it runs on the CPU and does not currently offload to GPU.
@@ -101,7 +101,7 @@ The node retains a PyTorch backend for desktop use:
 ```bash
 DNN_BACKEND=torch \
 DNN_WEIGHTS=/path/to/dnn_runs_lite/best.pt \
-python -m train_dnn.ros2_infer
+python -m gnd_seg_dnn.ros2_infer
 ```
 
 The Torch backend requires PyTorch. The ONNX backend loads no PyTorch modules.
@@ -111,7 +111,7 @@ The Torch backend requires PyTorch. The ONNX backend loads no PyTorch modules.
 - **Heightmap:** train a one-channel BEV input containing normalized per-cell maximum height:
 
   ```bash
-  python -m train_dnn.train --heightmap --out dnn_runs_heightmap
+  python -m gnd_seg_dnn.train --heightmap --out dnn_runs_heightmap
   ```
 
   Export it with the same `export_onnx` command. Its `pillar_vfe.npz` stores heightmap geometry and clipping settings rather than learned point-encoder weights.

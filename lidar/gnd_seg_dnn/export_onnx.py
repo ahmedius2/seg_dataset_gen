@@ -6,7 +6,7 @@ Splits the network into
   * dense BEV net (pure convs): <out>/bev_net.onnx, compiled by TIDL for the C7x
 
 Usage:
-    python -m train_dnn.export_onnx --ckpt dnn_runs_lite/best.pt --out export_lite
+    python -m gnd_seg_dnn.export_onnx --ckpt dnn_runs_lite/best.pt --out export_lite
 """
 
 import argparse

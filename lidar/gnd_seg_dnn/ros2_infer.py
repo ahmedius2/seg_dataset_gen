@@ -3,7 +3,7 @@
 dnn_inference_node.py
 
 Subscribes to AlignedCloudWithPose, runs the pillar-based BEV occupancy
-model from train_dnn (on GPU, fp16), and projects the resulting local BEV
+model from gnd_seg_dnn, and projects the resulting local BEV
 logits onto a 300x300 m^2 global occupancy grid.
 
 Key optimizations over the naive version:
@@ -44,14 +44,14 @@ from pc_transform_cpp.msg import AlignedCloudWithPose
 # ---------------------------------------------------------------------------
 # Make the training package importable.
 # ---------------------------------------------------------------------------
-TRAIN_DNN_ROOT = os.environ.get(
-    "TRAIN_DNN_ROOT",
+DNN_ROOT = os.environ.get(
+    "DNN_ROOT",
     "/home/ubuntu/shared/seg_dataset_gen/lidar",
 )
-if TRAIN_DNN_ROOT not in sys.path:
-    sys.path.insert(0, TRAIN_DNN_ROOT)
+if DNN_ROOT not in sys.path:
+    sys.path.insert(0, DNN_ROOT)
 
-from train_dnn.bev_ops import dilate_bev_mask
+from gnd_seg_dnn.bev_ops import dilate_bev_mask
 
 
 # ---------------------------------------------------------------------------
@@ -192,8 +192,8 @@ class DNNInferenceNode(Node):
     # -----------------------------------------------------------------------
     def _load_torch_model(self):
         import torch
-        from train_dnn.config import Config
-        from train_dnn.train import build_model
+        from gnd_seg_dnn.config import Config
+        from gnd_seg_dnn.train import build_model
 
         if not os.path.isfile(MODEL_WEIGHTS):
             raise FileNotFoundError(
@@ -223,7 +223,7 @@ class DNNInferenceNode(Node):
         return model
 
     def _load_onnx_model(self):
-        from train_dnn.onnx_runtime import OnnxRuntimeModel
+        from gnd_seg_dnn.onnx_runtime import OnnxRuntimeModel
 
         model_path_value = os.environ.get("DNN_ONNX_MODEL")
         if not model_path_value:
@@ -267,7 +267,7 @@ class DNNInferenceNode(Node):
         )
         model_input = torch.cat([batch_idx, pts], dim=1)
 
-        with torch.autocast(
+        with torch.no_grad(), torch.autocast(
             device_type=self.device.type,
             dtype=self.amp_dtype,
             enabled=self.use_amp,
@@ -275,7 +275,7 @@ class DNNInferenceNode(Node):
             logits = self.model(model_input)
 
         prob = torch.sigmoid(logits.float())[0]
-        return prob.cpu().numpy()
+        return prob.detach().cpu().numpy()
 
     # -----------------------------------------------------------------------
     # Coverage rasterization

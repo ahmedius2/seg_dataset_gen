@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# takes a exec mode argument, examples:
-# runsim.sh dataset_gen     runsim.sh test_remote
+# takes a exec mode argument:
+# runsim.sh (dataset_gen | test | test_remote)
 
 EXEC_MODE="${1:-dataset_gen}"  # or test or test_remote
 SCENE_NAME="${SCENE_NAME:-scene_0012_0}"
@@ -14,31 +14,27 @@ REMOTE_IP="10.42.0.231" # if running SITL on another machine
 
 export SCENE_NAME=${SCENE_NAME}
 
-if [[ "${EXEC_MODE}" == "dataset_gen" ]]; then
+rm -rf ${RUN_DIR}/*log ${RUN_DIR}/logs
+
+if [[ "${EXEC_MODE}" == "dataset_gen" && -d "${RUN_DIR}/bag_recording" ]]; then
     # check if directory is already created with bag recording
-    if [[ -d "${RUN_DIR}/bag_recording" ]]; then
-        echo "Skipping ${RUN_DIR}"
-        exit 0
-    fi
-    LIDAR_HZ="2"
-else # test
-    rm -rf ${RUN_DIR}/*log ${RUN_DIR}/logs
-    LIDAR_HZ="10"
+    echo "Skipping ${RUN_DIR}"
+    exit 0
 fi
 
-pushd $MODEL_SDF_DIR
-rm -f model.sdf # remove the existing symbolic link
-ln -s model_${LIDAR_HZ}hz.sdf model.sdf
-popd
-
-# Enable job control (-m) so each background job runs in its own process group
-set -m
+# Set LiDAR frequency
+LIDAR_HZ="2" #"10"
+LIDAR_SDF=${MODEL_SDF_DIR}/model.sdf
+sed -i "s|<update\_rate>.*</|<update\_rate>${LIDAR_HZ}</|" "${LIDAR_SDF}"
 
 # 1. Create a unique run directory based on the current timestamp
 mkdir -p ${RUN_DIR} ${DATA_OUT_DIR}
 
 echo "Running simulation for $SCENE_NAME in exec mode $EXEC_MODE"
 echo "Logs saving to: $RUN_DIR"
+
+# Enable job control (-m) so each background job runs in its own process group
+set -m
 
 # Array to store Process IDs (PIDs)
 PIDS=()
@@ -48,7 +44,8 @@ run_job() {
     local log_file="$1"
     shift
 
-    # Launch command in background, redirecting stdout/stderr to tee and detaching stdin
+    # Launch command in background:
+    # redirecting stdout/stderr to tee and detaching stdin
     "$@" </dev/null > >(tee "$log_file") 2>&1 &
 
     # Capture the PID
@@ -102,8 +99,9 @@ else
     IP_SIM=$LH
     IP_OF_SITL=$LH
 
-    run_job "${RUN_DIR}"/sitl.log sim_vehicle.py -v ArduCopter -f gazebo-iris --model JSON \
-            --no-rebuild --mavproxy-args="--out=tcpin:127.0.0.1:14551 --non-interactive"
+    run_job "${RUN_DIR}"/sitl.log sim_vehicle.py \
+            -v ArduCopter -f gazebo-iris --model JSON --no-rebuild \
+            --mavproxy-args="--out=tcpin:127.0.0.1:14551 --non-interactive"
 fi
 
 sed -i "s|<fdm_addr>.*</|<fdm_addr>${IP_SIM}</|" "${IP_SDF}"
@@ -112,39 +110,50 @@ run_job "$RUN_DIR/gz_sim.log" gz sim -v4 -r ${SCENE_NAME}.sdf
 run_job "$RUN_DIR/simulation_bridge.log" \
         ros2 launch copter_lidar_gzsim simulation_bridge.launch.py
 
-run_job "$RUN_DIR/topic_throttle.log" \
-        ros2 run topic_tools throttle messages /tf 20.0 /tf_throttled
-
-sleep 5
+sleep 30 # enough time to kick off
 
 python $CUR_PWD/collect_data.py $RUN_DIR takeoff # blocking call
 
 RECORD="false"
 if [[ "${EXEC_MODE}" == "dataset_gen" ]]; then
+    run_job "$RUN_DIR/topic_throttle.log" \
+            ros2 run topic_tools throttle messages /tf 20.0 /tf_throttled
+
     run_job "$RUN_DIR/rosbag.log" ros2 bag record --use-sim-tim \
             -o "$RUN_DIR/bag_recording" \
             --topics /sim_lidar/pointcloud/downsampled /tf_throttled
     RECORD="true"
 fi
 
-run_job "$RUN_DIR/pc_transform.log" \
-        ros2 launch pc_transform_cpp pc_transform.launch.py \
-        world_frame:=${SCENE_NAME} \
-        use_sim_time:=true \
-        output_dir:=${DATA_OUT_DIR} \
-        save_clouds:=${RECORD} \
-        save_poses:=${RECORD}
+if [[ $EXEC_MODE != "test_remote" ]]; then
+    run_job "$RUN_DIR/pc_transform.log" \
+            ros2 launch pc_transform_cpp pc_transform.launch.py \
+            use_sim_time:=true \
+            world_frame:=${SCENE_NAME} \
+            output_dir:=${DATA_OUT_DIR} \
+            save_clouds:=${RECORD} \
+            save_poses:=${RECORD}
+
+    if [[ $EXEC_MODE != "dataset_gen" ]]; then
+        PT="$CUR_PWD/../lidar"
+        # Pytorch run
+        export DNN_BACKEND=torch DNN_WEIGHTS=$PT/lite_model/best.pt
+        # Or, CPU run
+        #ONNX_PT=$(realpath ${PT}/lite_model/onnx_export/bev_net.onnx)
+        #export DNN_BACKEND=onnx DNN_ONNX_MODEL=$ONNX_PT
+        run_job "$RUN_DIR/ros2_dnn_infer.log" python ${PT}/gnd_seg_dnn/ros2_infer.py
+    fi
+fi
 
 if [[ "${EXEC_MODE}" == "dataset_gen" ]]; then
     python $CUR_PWD/collect_data.py $RUN_DIR mission
-else # test
-    #run_job "$RUN_DIR/ros2_dnn_infer.log" python $CUR_PWD/../lidar/train_dnn/ros2_infer.py
-    export DNN_BACKEND=onnx DNN_ONNX_MODEL=$(realpath $CUR_PWD/../lidar/lite_model/onnx_export/bev_net.onnx)
-    run_job "$RUN_DIR/ros2_dnn_infer.log" python $CUR_PWD/../lidar/train_dnn/ros2_infer.py
+else
     python $CUR_PWD/collect_data.py $RUN_DIR mission_norotate
 fi
 
 popd
+
+cleanup
 
 # check if ${RUN_DIR}/bag_recording exists, if not, exit with error code 1
 if [[ ${EXEC_MODE} == "dataset_gen" ]]; then
@@ -152,9 +161,8 @@ if [[ ${EXEC_MODE} == "dataset_gen" ]]; then
         echo "Error: ${RUN_DIR}/bag_recording does not exist. Simulation failed."
         exit 1
     else
-        echo "Simulation completed successfully. Bag recording is available at: ${RUN_DIR}/bag_recording"
+        echo "Simulation completed successfully."
+        echo "Bag recording is available at: ${RUN_DIR}/bag_recording"
         exit 0
     fi
 fi
-
-cleanup

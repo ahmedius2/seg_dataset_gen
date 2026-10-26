@@ -280,7 +280,6 @@ if __name__ == '__main__':
     try:
         if PHASE == "takeoff":
             # --- PHASE 1: Arm, take off, and navigate to the scan start position ---
-            set_speed(vehicle, TARGET_SPEED)
             arm_and_takeoff_local(
                 vehicle,
                 SPAWN_POS['x'],

@@ -3,6 +3,19 @@
 import numpy as np
 
 
+COVERAGE_REACH_M = 1.6
+
+
+def coverage_kernel_size(cell_size, target_m=COVERAGE_REACH_M):
+    """Odd kernel size (cells) whose metric width is closest to target_m.
+
+    Ties go to the smaller kernel.
+    """
+    lower = max(1, 2 * int(np.floor((target_m / cell_size - 1) / 2)) + 1)
+    upper = lower + 2
+    return min((lower, upper), key=lambda k: (abs(k * cell_size - target_m), k))
+
+
 def dilate_bev_mask(mask, kernel_size=11):
     if kernel_size is None or kernel_size <= 1:
         return mask

@@ -43,9 +43,9 @@ class Config:
     z_min: float = -10.0 # ignore z, its using pillars
     z_max: float = 10.0
     point_cloud_range: list[float] = field(default_factory=lambda: [-6.4, -25.6, -10.0, 6.4, 25.6, 10.0])
-    cell_size: float = 0.2          # 0.2 m x 0.2 m = 0.04 m^2 per cell
+    cell_size: float = 0.8          # 0.8 m x 0.8 m = 0.64 m^2 per cell
     # z spans the full z range so every point falls into a single z pillar bucket
-    pillar_dims: list[float] = field(default_factory=lambda: [0.2, 0.2, 20.0])
+    pillar_dims: list[float] = field(default_factory=lambda: [0.8, 0.8, 20.0])
     # Which cloud axis feeds the grid column (j) and row (i). 0=x, 1=y, 2=z
     col_axis: int = 0
     row_axis: int = 1
@@ -94,8 +94,8 @@ class Config:
     save_every: int = 5
     eval_threshold: float = 0.5
     val_visualizations: int = 4
-    # Dilate the LiDAR-hit mask when hiding unconstrained predictions.
-    # Training still ignores only cells that received no points.
+    # Deprecated and unused: coverage reach is now fixed in meters via
+    # bev_ops.coverage_kernel_size(cell_size). Kept so old checkpoints load.
     pred_coverage_kernel: int = 11
 
     # Stop when val IoU hasn't improved by min_delta for this many epochs (0 = off).
@@ -134,6 +134,20 @@ class Config:
         self.grid_h = int(round((self.y_max - self.y_min) / self.cell_size))
         if self.grid_w <= 0 or self.grid_h <= 0:
             raise ValueError("Invalid BEV extent / cell_size")
+        # Extents must be whole multiples of cell_size, otherwise the grid
+        # silently covers a different range than x/y_min..max.
+        for name, extent, n in (("x", self.x_max - self.x_min, self.grid_w),
+                                ("y", self.y_max - self.y_min, self.grid_h)):
+            if abs(n * self.cell_size - extent) > 1e-6:
+                raise ValueError(
+                    f"{name} extent {extent} m is not a multiple of "
+                    f"cell_size {self.cell_size}")
+        # The backbones downsample 8x and upsample back; other sizes break
+        # the output shape.
+        if self.grid_w % 8 or self.grid_h % 8:
+            raise ValueError(
+                f"BEV grid {self.grid_w}x{self.grid_h} must be divisible by 8 "
+                f"(cell_size={self.cell_size})")
         if self.col_axis == self.row_axis:
             raise ValueError("col_axis and row_axis must differ")
 

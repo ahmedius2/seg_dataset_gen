@@ -8,7 +8,7 @@ import torch
 from torch.utils.data import Dataset
 
 from .config import Config
-from .bev_ops import dilate_bev_mask
+from .bev_ops import coverage_kernel_size, dilate_bev_mask
 
 
 # --------------------------------------------------------------------------- #
@@ -139,8 +139,8 @@ def rasterize_occupancy(xyz, intensity, cfg: Config):
     if is_occ.any():
         occ[i[is_occ], j[is_occ]] = 1.0
 
-    # Fill small holes in the occupancy mask.
-    occ = dilate_bev_mask(occ, 11)
+    # Fill small holes using a fixed metric reach across BEV resolutions.
+    occ = dilate_bev_mask(occ, coverage_kernel_size(cfg.cell_size))
 
     return occ, observed
 

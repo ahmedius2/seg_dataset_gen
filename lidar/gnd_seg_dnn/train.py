@@ -12,6 +12,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 
 
+from .bev_ops import coverage_kernel_size
 
 from .config import Config
 from .dataset import (BEVOccupancyDataset, collate_fn, dilate_bev_mask,
@@ -247,7 +248,7 @@ def save_validation_visualizations(model, loader, device, cfg, epoch, out_dir):
 
         for index in range(target.shape[0]):
             observed = weight[index].numpy() > 0.5
-            coverage = dilate_bev_mask(observed, cfg.pred_coverage_kernel)
+            coverage = dilate_bev_mask(observed, coverage_kernel_size(cfg.cell_size))
             target_image = target[index].numpy() > 0.5
             prob_image = probability[index].numpy()
             pred_image = prediction[index].numpy()

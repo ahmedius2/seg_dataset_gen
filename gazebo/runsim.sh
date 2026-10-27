@@ -14,7 +14,7 @@ REMOTE_IP="10.42.0.231" # if running SITL on another machine
 
 export SCENE_NAME=${SCENE_NAME}
 
-rm -rf ${RUN_DIR}/*log ${RUN_DIR}/logs
+rm -rf ${RUN_DIR}/*log ${RUN_DIR}/logs ~/.ros/log ~/.gz/sim/log/
 
 if [[ "${EXEC_MODE}" == "dataset_gen" && -d "${RUN_DIR}/bag_recording" ]]; then
     # check if directory is already created with bag recording
@@ -137,7 +137,7 @@ if [[ $EXEC_MODE != "test_remote" ]]; then
     if [[ $EXEC_MODE != "dataset_gen" ]]; then
         PT="$CUR_PWD/../lidar"
         # Pytorch run
-        export DNN_BACKEND=torch DNN_WEIGHTS=$PT/lite_model/best.pt
+        export DNN_BACKEND=torch DNN_WEIGHTS=$PT/lite_model_08/best.pt
         # Or, CPU run
         #ONNX_PT=$(realpath ${PT}/lite_model/onnx_export/bev_net.onnx)
         #export DNN_BACKEND=onnx DNN_ONNX_MODEL=$ONNX_PT

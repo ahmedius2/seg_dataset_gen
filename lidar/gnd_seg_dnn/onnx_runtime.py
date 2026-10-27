@@ -1,5 +1,6 @@
 """NumPy point encoders and CPU ONNX Runtime inference; does not import PyTorch."""
 
+import time
 from pathlib import Path
 
 import numpy as np
@@ -86,11 +87,16 @@ class OnnxRuntimeModel:
         )
         self.input_name = self.session.get_inputs()[0].name
         self.output_name = self.session.get_outputs()[0].name
+        self.last_timings_ms = (0.0, 0.0)  # (encoding, network)
 
     def __call__(self, points):
+        t0 = time.perf_counter()
         bev = self.encoder(points)
+        t1 = time.perf_counter()
         logits = self.session.run(
             [self.output_name], {self.input_name: bev}
         )[0][0, 0]
+        self.last_timings_ms = ((t1 - t0) * 1000.0,
+                                (time.perf_counter() - t1) * 1000.0)
         logits = np.clip(logits, -80.0, 80.0)
         return (1.0 / (1.0 + np.exp(-logits))).astype(np.float32)

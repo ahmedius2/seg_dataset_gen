@@ -51,16 +51,15 @@ DNN_ROOT = os.environ.get(
 if DNN_ROOT not in sys.path:
     sys.path.insert(0, DNN_ROOT)
 
-from gnd_seg_dnn.bev_ops import dilate_bev_mask
+from gnd_seg_dnn.bev_ops import coverage_kernel_size, dilate_bev_mask
 
 
 # ---------------------------------------------------------------------------
 # Global map configuration
 # ---------------------------------------------------------------------------
 GLOBAL_MAP_SIZE_M      = 300.0
-GLOBAL_MAP_RESOLUTION  = 0.2
-GLOBAL_MAP_WIDTH       = int(GLOBAL_MAP_SIZE_M / GLOBAL_MAP_RESOLUTION)
-GLOBAL_MAP_HEIGHT      = int(GLOBAL_MAP_SIZE_M / GLOBAL_MAP_RESOLUTION)
+# Global map resolution is not configurable: it always equals the model's
+# cell_size (pillar size), so each BEV cell maps to exactly one global cell.
 
 WORLD_FRAME = os.environ.get("SCENE_NAME", "scene_0000_0")
 
@@ -107,12 +106,22 @@ class DNNInferenceNode(Node):
             f"{self.grid_w} x {self.grid_h} cells @ {self.cfg.cell_size} m"
         )
 
-        # ---- global occupancy grid ----
+        # Coverage reach is fixed in meters, so the kernel scales with cell size.
+        self.coverage_kernel = coverage_kernel_size(self.cfg.cell_size)
+        self.get_logger().info(
+            f"Coverage dilation kernel: {self.coverage_kernel} cells "
+            f"(~{self.coverage_kernel * self.cfg.cell_size:.1f} m)"
+        )
+
+        # ---- global occupancy grid (resolution locked to pillar size) ----
+        self.global_res = float(self.cfg.cell_size)
+        self.global_w = int(GLOBAL_MAP_SIZE_M / self.global_res)
+        self.global_h = int(GLOBAL_MAP_SIZE_M / self.global_res)
         self.global_map = np.full(
-            (GLOBAL_MAP_HEIGHT, GLOBAL_MAP_WIDTH), -1, dtype=np.int8
+            (self.global_h, self.global_w), -1, dtype=np.int8
         )
         self.log_odds = np.zeros(
-            (GLOBAL_MAP_HEIGHT, GLOBAL_MAP_WIDTH), dtype=np.float32
+            (self.global_h, self.global_w), dtype=np.float32
         )
         # Flat views — reused everywhere to avoid reshape allocations.
         self._log_odds_flat = self.log_odds.reshape(-1)
@@ -129,7 +138,7 @@ class DNNInferenceNode(Node):
         self.L_THRESH = 0.00
 
         # Cached constants for the fusion path.
-        self._inv_global_res = 1.0 / GLOBAL_MAP_RESOLUTION
+        self._inv_global_res = 1.0 / self.global_res
 
         # ---- latest local map snapshot for the 1 Hz local publisher ----
         self._local_lock = threading.Lock()
@@ -140,6 +149,8 @@ class DNNInferenceNode(Node):
         self._last_infer_count = 0
 
         self.log_exec_time = False
+        self._enc_ms = 0.0
+        self._net_ms = 0.0
 
         # ------------------------------------------------------------------
         # ROS interfaces — split across callback groups so the 1 Hz
@@ -180,9 +191,9 @@ class DNNInferenceNode(Node):
         #)
 
         self.get_logger().info(
-            f"Global map: {GLOBAL_MAP_WIDTH}x{GLOBAL_MAP_HEIGHT} cells "
+            f"Global map: {self.global_w}x{self.global_h} cells "
             f"({GLOBAL_MAP_SIZE_M}x{GLOBAL_MAP_SIZE_M} m @ "
-            f"{GLOBAL_MAP_RESOLUTION} m/cell), origin = "
+            f"{self.global_res} m/cell), origin = "
             f"({self.global_origin_x:.1f}, {self.global_origin_y:.1f}); "
             f"publishing at {1.0/PUBLISH_PERIOD_S:.1f} Hz"
         )
@@ -256,7 +267,9 @@ class DNNInferenceNode(Node):
             return np.zeros((self.grid_h, self.grid_w), dtype=np.float32)
 
         if self.backend == "onnx":
-            return self.model(xyz_aligned)
+            prob = self.model(xyz_aligned)
+            self._enc_ms, self._net_ms = self.model.last_timings_ms
+            return prob
 
         torch = self.torch
         pts = torch.as_tensor(
@@ -267,15 +280,44 @@ class DNNInferenceNode(Node):
         )
         model_input = torch.cat([batch_idx, pts], dim=1)
 
+        timed = self.log_exec_time
         with torch.no_grad(), torch.autocast(
             device_type=self.device.type,
             dtype=self.amp_dtype,
             enabled=self.use_amp,
         ):
-            logits = self.model(model_input)
+            if timed:
+                logits = self._timed_forward(model_input)
+            else:
+                logits = self.model(model_input)
 
         prob = torch.sigmoid(logits.float())[0]
         return prob.detach().cpu().numpy()
+
+    def _sync(self):
+        if self.device.type == "cuda":
+            self.torch.cuda.synchronize()
+
+    def _timed_forward(self, model_input):
+        """Same computation as model.forward, timing encoding vs. the rest."""
+        m = self.model
+        self._sync()
+        t0 = time.perf_counter()
+        if hasattr(m, "vfe"):
+            coords, feats = m.vfe(model_input)
+            x = m.scatter(coords, feats)
+        else:
+            x = m.encoder(model_input)
+        self._sync()
+        t1 = time.perf_counter()
+        x = m.backbone(x)
+        if hasattr(m, "head"):
+            x = m.head(x)
+        logits = x.squeeze(1)
+        self._sync()
+        self._enc_ms = (t1 - t0) * 1000.0
+        self._net_ms = (time.perf_counter() - t1) * 1000.0
+        return logits
 
     # -----------------------------------------------------------------------
     # Coverage rasterization
@@ -296,7 +338,7 @@ class DNNInferenceNode(Node):
         if inside.any():
             observed[i[inside], j[inside]] = True
 
-        coverage = dilate_bev_mask(observed, cfg.pred_coverage_kernel)
+        coverage = dilate_bev_mask(observed, self.coverage_kernel)
         return np.asarray(coverage, dtype=bool)
 
     # -----------------------------------------------------------------------
@@ -367,7 +409,8 @@ class DNNInferenceNode(Node):
         if self.log_exec_time:
             total_ms = (time.perf_counter() - t_start) * 1000.0
             self.get_logger().info(
-                f"[callback] unpack {unpack_ms:.2f}  infer {infer_ms:.2f}  "
+                f"[callback] unpack {unpack_ms:.2f}  infer {infer_ms:.2f} "
+                f"(pillar-enc {self._enc_ms:.2f} + net {self._net_ms:.2f})  "
                 f"raster {rasterize_ms:.2f}  fuse {fuse_ms:.2f}  "
                 f"total {total_ms:.2f} ms"
             )
@@ -417,13 +460,13 @@ class DNNInferenceNode(Node):
         grow = np.floor((pw_y - self.global_origin_y) * self._inv_global_res).astype(np.int64)
 
         valid = (
-            (grow >= 0) & (grow < GLOBAL_MAP_HEIGHT) &
-            (gcol >= 0) & (gcol < GLOBAL_MAP_WIDTH)
+            (grow >= 0) & (grow < self.global_h) &
+            (gcol >= 0) & (gcol < self.global_w)
         )
         if not np.any(valid):
             return np.empty(0, dtype=np.int64)
 
-        return grow[valid] * GLOBAL_MAP_WIDTH + gcol[valid]
+        return grow[valid] * self.global_w + gcol[valid]
 
     def _apply_log_odds(self, flat_idx, delta):
         """
@@ -454,9 +497,9 @@ class DNNInferenceNode(Node):
         msg = OccupancyGrid()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = WORLD_FRAME
-        msg.info.resolution = GLOBAL_MAP_RESOLUTION
-        msg.info.width = GLOBAL_MAP_WIDTH
-        msg.info.height = GLOBAL_MAP_HEIGHT
+        msg.info.resolution = self.global_res
+        msg.info.width = self.global_w
+        msg.info.height = self.global_h
         msg.info.origin = Pose(
             position=Point(x=self.global_origin_x, y=self.global_origin_y, z=0.0),
             orientation=Quaternion(x=0.0, y=0.0, z=0.0, w=1.0),

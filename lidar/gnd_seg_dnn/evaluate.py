@@ -2,6 +2,7 @@
 
 import argparse
 import json
+from dataclasses import fields
 from pathlib import Path
 
 import numpy as np
@@ -138,8 +139,12 @@ def sweep_thresholds(model, loader, device, cfg, thresholds=None):
 
 def load_model(ckpt_path, device, cfg_override=None):
     """Rebuild the model from a checkpoint and load its weights."""
-    ckpt = torch.load(ckpt_path, map_location=device)
-    cfg = Config(**ckpt["config"]) if cfg_override is None else cfg_override
+    ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+    if cfg_override is None:
+        init_names = {f.name for f in fields(Config) if f.init}
+        cfg = Config(**{k: v for k, v in ckpt["config"].items() if k in init_names})
+    else:
+        cfg = cfg_override
     cfg.__post_init__()
 
     model = build_model(cfg).to(device)

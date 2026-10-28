@@ -105,7 +105,9 @@ class StaticPillarOnnxModel:
     BEV backbone ONNX. `export_dir` holds pfn.onnx and bev_net.onnx."""
 
     def __init__(self, export_dir, cfg, bev_path=None, pfn_path=None,
-                 providers=("CPUExecutionProvider",)):
+                 providers=("CPUExecutionProvider",), tidl_artifacts=None):
+        """tidl_artifacts: dir from tidl_compile.py (pfn/, bev/); runs both
+        nets on the C7x through TIDLExecutionProvider."""
 
         export_dir = Path(export_dir)
         self.cfg = cfg
@@ -119,10 +121,17 @@ class StaticPillarOnnxModel:
         self.max_pillars = int(cfg.max_pillars)
         self.max_points = int(cfg.max_points_per_voxel)
         self.threads = int(getattr(cfg, "voxelizer_threads", 4))
-        self.pfn = ort.InferenceSession(
-            str(pfn_path or export_dir / "pfn.onnx"), providers=list(providers))
-        self.bev = ort.InferenceSession(
-            str(bev_path or export_dir / "bev_net.onnx"), providers=list(providers))
+        def session(path, sub):
+            if tidl_artifacts is None:
+                return ort.InferenceSession(str(path), providers=list(providers))
+            opts = {"artifacts_folder": str(Path(tidl_artifacts) / sub),
+                    "debug_level": 0}
+            return ort.InferenceSession(
+                str(path), providers=["TIDLExecutionProvider", "CPUExecutionProvider"],
+                provider_options=[opts, {}])
+
+        self.pfn = session(pfn_path or export_dir / "pfn.onnx", "pfn")
+        self.bev = session(bev_path or export_dir / "bev_net.onnx", "bev")
         self.pfn_in = self.pfn.get_inputs()[0].name
         self.bev_in = self.bev.get_inputs()[0].name
         self.last_timings_ms = (0.0, 0.0)  # (pillar encoding, BEV network)

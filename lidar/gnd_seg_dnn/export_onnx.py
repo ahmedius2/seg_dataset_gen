@@ -51,14 +51,28 @@ class PFNExport(torch.nn.Module):
             conv.bias.data = b
             self.convs.append(conv)
             self.last.append(layer.last_vfe)
-        self.pool = torch.nn.MaxPool2d((1, max_points))
-        self.up = torch.nn.Upsample(scale_factor=(1, max_points), mode="nearest")
+        if max_points < 1 or max_points & (max_points - 1):
+            raise ValueError("max_points_per_voxel must be a power of two for TIDL")
+        self.steps = max_points.bit_length() - 1
+        # TIDL rejects a 1xP pool and non-square Resize: use log2(P) 1x2 pools
+        # and width-doubling Concats, which are exactly equivalent.
+        self.pool = torch.nn.MaxPool2d((1, 2), stride=(1, 2))
+
+    def _pool(self, x):
+        for _ in range(self.steps):
+            x = self.pool(x)
+        return x
+
+    def _up(self, x):
+        for _ in range(self.steps):
+            x = torch.cat([x, x], dim=3)
+        return x
 
     def forward(self, x):
         for conv, last in zip(self.convs, self.last):
             x = torch.relu(conv(x))
-            pooled = self.pool(x)
-            x = pooled if last else torch.cat([x, self.up(pooled)], dim=1)
+            pooled = self._pool(x)
+            x = pooled if last else torch.cat([x, self._up(pooled)], dim=1)
         return x
 
 

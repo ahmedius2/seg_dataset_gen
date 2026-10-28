@@ -261,8 +261,9 @@ class DNNInferenceNode(Node):
         self.cfg.grid_h = int(round((self.cfg.y_max - self.cfg.y_min) / self.cfg.cell_size))
         self.get_logger().info(f"Loading CPU ONNX model from {model_path}")
         if static_vfe:
-            return StaticPillarOnnxModel(export_dir, self.cfg,
-                                         bev_path=model_path, pfn_path=pfn_path)
+            return StaticPillarOnnxModel(
+                export_dir, self.cfg, bev_path=model_path, pfn_path=pfn_path,
+                tidl_artifacts=os.environ.get("DNN_TIDL_ARTIFACTS"))
         return DynamicPillarOnnxModel(model_path, encoder_path, self.cfg.model_variant)
 
     # -----------------------------------------------------------------------

@@ -1,7 +1,20 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch_scatter
+
+try:
+    import torch_scatter
+except ImportError:
+    torch_scatter = None
+
+
+def _require_torch_scatter():
+    if torch_scatter is None:
+        raise ImportError(
+            "torch_scatter is required to run the dynamic pillar VFE. "
+            "Static pillar training, evaluation, ONNX export, and ONNX/TIDL "
+            "inference do not require it."
+        )
 
 
 class VFETemplate(nn.Module):
@@ -46,6 +59,7 @@ class PFNLayerV2(nn.Module):
         self.relu = nn.ReLU()
 
     def forward(self, inputs, unq_inv):
+        _require_torch_scatter()
 
         x = self.linear(inputs)
         x = self.norm(x) if self.use_norm else x
@@ -102,6 +116,8 @@ class DynamicPillarVFE(VFETemplate):
         return self.num_filters[-1]
 
     def forward(self, points):
+        _require_torch_scatter()
+
         # Here, we filter the points out of range
         points_coords = torch.floor((points[:, [1,2]] - self.point_cloud_range[[0,1]]) / self.voxel_size[[0,1]]).int()
         mask = ((points_coords >= 0) & (points_coords < self.grid_size[[0,1]])).all(dim=1)

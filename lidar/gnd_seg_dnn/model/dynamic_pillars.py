@@ -113,7 +113,7 @@ class DynamicPillarVFE(VFETemplate):
                        points_coords[:, 0] * self.scale_y + \
                        points_coords[:, 1]
 
-        unq_coords, unq_inv = torch.unique(merge_coords, return_inverse=True, return_counts=False, dim=0)
+        unq_coords, unq_inv = torch.unique(merge_coords, return_inverse=True, return_counts=False)
 
         points_mean = torch_scatter.scatter_mean(points_xyz, unq_inv, dim=0)
         f_cluster = points_xyz - points_mean[unq_inv, :]

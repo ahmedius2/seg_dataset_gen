@@ -21,6 +21,7 @@ from .losses import build_loss
 from .metrics import average_precision, confusion_counts, metrics_from_counts
 
 from .model.dynamic_pillars import DynamicPillarVFE
+from .model.static_pillars import PillarVFE
 from .model.pillar_scatter import PointPillarScatter
 from .model.base_bev_backbone import BaseBEVBackbone
 from .model.centerhead import CenterHead
@@ -62,9 +63,14 @@ def build_model(cfg: Config):
                                cfg.grid_w, cfg.grid_h, cfg.height_clip)
         return HeightMapModel(enc, LiteBEVNet(in_ch=1))
 
-    vfe = DynamicPillarVFE(model_cfg=cfg.vfe_config, num_point_features=cfg.num_point_features,
-                           voxel_size=cfg.pillar_dims, grid_size=cfg.grid_size,
-                           point_cloud_range=cfg.point_cloud_range)
+    vfe_kwargs = dict(model_cfg=cfg.vfe_config, num_point_features=cfg.num_point_features,
+                      voxel_size=cfg.pillar_dims, grid_size=cfg.grid_size,
+                      point_cloud_range=cfg.point_cloud_range)
+    if cfg.vfe_type == "static":
+        vfe = PillarVFE(max_points_per_voxel=cfg.max_points_per_voxel,
+                        num_threads=cfg.voxelizer_threads, **vfe_kwargs)
+    else:
+        vfe = DynamicPillarVFE(**vfe_kwargs)
     scatter = PointPillarScatter(model_cfg=cfg.scatter_config, grid_size=cfg.grid_size)
     if cfg.model_variant == "lite":
         backbone = LiteBEVNet(in_ch=cfg.scatter_config['NUM_BEV_FEATURES'])
@@ -280,6 +286,77 @@ def save_validation_visualizations(model, loader, device, cfg, epoch, out_dir):
             canvas.save(filename)
 
 
+@torch.no_grad()
+def report_point_stats(loader, cfg: Config, out_dir):
+    """Histograms over a whole loader: points/frame, pillars/frame, points/pillar."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    nx, ny = cfg.grid_w, cfg.grid_h
+    pts_frame, pil_frame, pil_pts = [], [], []
+    for pts, *_ in loader:
+        b = pts[:, 0].long()
+        ix = torch.floor((pts[:, 1] - cfg.x_min) / cfg.cell_size).long()
+        iy = torch.floor((pts[:, 2] - cfg.y_min) / cfg.cell_size).long()
+        ok = (ix >= 0) & (ix < nx) & (iy >= 0) & (iy < ny)
+        b, key = b[ok], b[ok] * nx * ny + ix[ok] * ny + iy[ok]
+        uniq, counts = torch.unique(key, return_counts=True)
+        n_frames = int(pts[:, 0].max().item()) + 1
+        pts_frame += torch.bincount(b, minlength=n_frames).tolist()
+        pil_frame += torch.bincount(uniq // (nx * ny), minlength=n_frames).tolist()
+        pil_pts.append(counts)
+    pil_pts = torch.cat(pil_pts).numpy()
+    series = {
+        "points_per_frame": np.asarray(pts_frame),
+        "pillars_per_frame": np.asarray(pil_frame),
+        "points_per_pillar": pil_pts,
+    }
+
+    summary = {}
+    for name, v in series.items():
+        pct = np.percentile(v, [50, 95, 99])
+        summary[name] = {"min": int(v.min()), "mean": float(v.mean()),
+                         "p50": float(pct[0]), "p95": float(pct[1]),
+                         "p99": float(pct[2]), "max": int(v.max())}
+    P = cfg.max_points_per_voxel
+    summary["pct_pillars_over_max_points"] = float((pil_pts > P).mean() * 100)
+    summary["pct_points_dropped_by_cap"] = float(
+        np.maximum(pil_pts - P, 0).sum() / pil_pts.sum() * 100)
+    summary["pct_frames_over_max_pillars"] = float(
+        (series["pillars_per_frame"] > cfg.max_pillars).mean() * 100)
+    summary["max_points_per_voxel"] = P
+    summary["max_pillars"] = cfg.max_pillars
+
+    print("  validation point/pillar statistics:")
+    for name in series:
+        s = summary[name]
+        print(f"    {name}: min {s['min']} mean {s['mean']:.1f} p50 {s['p50']:.0f} "
+              f"p95 {s['p95']:.0f} p99 {s['p99']:.0f} max {s['max']}")
+    print(f"    pillars with > {P} points: {summary['pct_pillars_over_max_points']:.2f}% "
+          f"(points dropped by cap: {summary['pct_points_dropped_by_cap']:.2f}%)")
+    print(f"    frames with > {cfg.max_pillars} pillars: "
+          f"{summary['pct_frames_over_max_pillars']:.2f}%")
+
+    (Path(out_dir) / "point_stats.json").write_text(json.dumps(summary, indent=2))
+    fig, axes = plt.subplots(1, 3, figsize=(16, 4))
+    for ax, (name, v) in zip(axes, series.items()):
+        hi = np.percentile(v, 99.5) if name == "points_per_pillar" else v.max()
+        ax.hist(np.clip(v, None, hi), bins=min(60, max(int(hi) + 1, 5)))
+        ax.set_title(name.replace("_", " "))
+        ax.set_yscale("log")
+        for q, ls in ((95, "--"), (99, ":")):
+            ax.axvline(np.percentile(v, q), color="r", ls=ls, label=f"p{q}")
+        ax.legend()
+    axes[2].axvline(P, color="k", label=f"max_points={P}")
+    axes[2].legend()
+    axes[1].axvline(cfg.max_pillars, color="k", label=f"max_pillars={cfg.max_pillars}")
+    axes[1].legend()
+    fig.tight_layout()
+    fig.savefig(Path(out_dir) / "point_stats.png", dpi=120)
+    plt.close(fig)
+
+
 def format_stats(tag, stats):
     return (f"[{tag}] loss={stats['loss']:.4f} "
             f"iou={stats['iou']:.4f} f1={stats['f1']:.4f} "
@@ -316,6 +393,12 @@ def main():
                         help="train the embedded (TIDL-friendly) model")
     parser.add_argument("--heightmap", action="store_true",
                         help="train the lite net on a 1-channel max-height map")
+    parser.add_argument("--cell-size", type=float, default=None,
+                        help="BEV cell / pillar size in meters (e.g. 0.2, 0.4, 0.8)")
+    parser.add_argument("--vfe", choices=["dynamic", "static"], default=None,
+                        help="pillar encoder: dynamic (all points) or static (capped per pillar)")
+    parser.add_argument("--max-points", type=int, default=None,
+                        help="points per pillar for the static VFE")
     args = parser.parse_args()
 
     cfg = Config.from_json(args.config) if args.config else (
@@ -327,6 +410,9 @@ def main():
     if args.batch_size: cfg.batch_size = args.batch_size
     if args.lr: cfg.lr = args.lr
     if args.loss: cfg.loss_type = args.loss
+    if args.cell_size: cfg.cell_size = args.cell_size
+    if args.vfe: cfg.vfe_type = args.vfe
+    if args.max_points: cfg.max_points_per_voxel = args.max_points
     cfg.__post_init__()
 
     set_seed(cfg.seed)
@@ -388,6 +474,8 @@ def main():
         print(f"epoch {epoch} ({time.time() - t0:.1f}s)")
         print("  " + format_stats("train", tr))
         print("  " + format_stats("val  ", va))
+        if epoch == start_epoch and cfg.model_variant == "lite" and cfg.vfe_type == "static":
+            report_point_stats(val_loader, cfg, out_dir)
 
         history.append({"epoch": epoch, "train": tr, "val": va})
         (out_dir / "history.json").write_text(json.dumps(history, indent=2))

@@ -105,8 +105,17 @@ class Config:
     # Heightmap variant: heights are clipped to +-height_clip metres before scaling.
     height_clip: float = 5.0
 
+    # "dynamic" = DynamicPillarVFE (all points), "static" = PillarVFE (at most
+    # max_points_per_voxel points per pillar, extras dropped).
+    vfe_type: str = "dynamic"
+    max_points_per_voxel: int = 32
+    # Fixed pillar count of the exported PFN (TIDL needs static shapes);
+    # pillars beyond it are dropped at inference. Only utilized when exporting.
+    max_pillars: int = 4096
+    voxelizer_threads: int = 4      # C++ voxelizer threads (static VFE on CPU)
+
     # "full" = original OpenPCDet-style net, "lite" = TIDL/embedded-friendly net
-    model_variant: str = "full"
+    model_variant: str = "lite"
 
     # ---- Derived ----
     grid_h: int = field(init=False, default=0)
@@ -134,6 +143,7 @@ class Config:
         self.grid_h = int(round((self.y_max - self.y_min) / self.cell_size))
         if self.grid_w <= 0 or self.grid_h <= 0:
             raise ValueError("Invalid BEV extent / cell_size")
+        self.max_pillars = self.grid_h * self.grid_w
         # Extents must be whole multiples of cell_size, otherwise the grid
         # silently covers a different range than x/y_min..max.
         for name, extent, n in (("x", self.x_max - self.x_min, self.grid_w),
@@ -148,6 +158,8 @@ class Config:
             raise ValueError(
                 f"BEV grid {self.grid_w}x{self.grid_h} must be divisible by 8 "
                 f"(cell_size={self.cell_size})")
+        if self.vfe_type not in ("dynamic", "static"):
+            raise ValueError("vfe_type must be 'dynamic' or 'static'")
         if self.col_axis == self.row_axis:
             raise ValueError("col_axis and row_axis must differ")
 

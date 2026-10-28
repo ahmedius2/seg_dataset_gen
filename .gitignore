@@ -3,3 +3,9 @@ scene_bl5
 scene_bl4
 BlenderProc
 blenderproc_py_env
+
+# C++ voxelizer build artifacts
+lidar/build/
+lidar/gnd_seg_dnn/*.so
+__pycache__/
+*.py[cod]

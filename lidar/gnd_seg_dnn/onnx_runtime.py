@@ -2,9 +2,9 @@
 
 import time
 from pathlib import Path
-
+import onnxruntime as ort
 import numpy as np
-
+from .model.pillar_ops import scatter, decorate, voxelize
 
 class PillarEncoderNP:
     def __init__(self, npz_path):
@@ -74,9 +74,8 @@ class HeightMapEncoderNP:
         return result.reshape(1, 1, self.ny, self.nx)
 
 
-class OnnxRuntimeModel:
+class DynamicPillarOnnxModel:
     def __init__(self, model_path, encoder_path, model_variant):
-        import onnxruntime as ort
 
         model_path = Path(model_path)
         encoder_cls = (HeightMapEncoderNP if model_variant == "heightmap"
@@ -96,6 +95,52 @@ class OnnxRuntimeModel:
         logits = self.session.run(
             [self.output_name], {self.input_name: bev}
         )[0][0, 0]
+        self.last_timings_ms = ((t1 - t0) * 1000.0,
+                                (time.perf_counter() - t1) * 1000.0)
+        logits = np.clip(logits, -80.0, 80.0)
+        return (1.0 / (1.0 + np.exp(-logits))).astype(np.float32)
+
+class StaticPillarOnnxModel:
+    """Static-VFE pipeline: C++ voxelize + decorate, PFN ONNX, NumPy scatter,
+    BEV backbone ONNX. `export_dir` holds pfn.onnx and bev_net.onnx."""
+
+    def __init__(self, export_dir, cfg, bev_path=None, pfn_path=None,
+                 providers=("CPUExecutionProvider",)):
+
+        export_dir = Path(export_dir)
+        self.cfg = cfg
+        vfe = cfg.vfe_config
+        self.abs_xyz = bool(vfe["USE_ABSLOTE_XYZ"])
+        self.with_distance = bool(vfe["WITH_DISTANCE"])
+        self.range = [cfg.x_min, cfg.y_min, cfg.z_min, cfg.x_max, cfg.y_max, cfg.z_max]
+        self.voxel = [cfg.cell_size, cfg.cell_size, cfg.z_max - cfg.z_min]
+        self.grid_w = int(round((cfg.x_max - cfg.x_min) / cfg.cell_size))
+        self.grid_h = int(round((cfg.y_max - cfg.y_min) / cfg.cell_size))
+        self.max_pillars = int(cfg.max_pillars)
+        self.max_points = int(cfg.max_points_per_voxel)
+        self.threads = int(getattr(cfg, "voxelizer_threads", 4))
+        self.pfn = ort.InferenceSession(
+            str(pfn_path or export_dir / "pfn.onnx"), providers=list(providers))
+        self.bev = ort.InferenceSession(
+            str(bev_path or export_dir / "bev_net.onnx"), providers=list(providers))
+        self.pfn_in = self.pfn.get_inputs()[0].name
+        self.bev_in = self.bev.get_inputs()[0].name
+        self.last_timings_ms = (0.0, 0.0)  # (pillar encoding, BEV network)
+        self.dropped_pillars = 0
+
+    def __call__(self, points):
+        t0 = time.perf_counter()
+        vox, npts, coords = voxelize(
+            points, self.range, self.voxel, (self.grid_w, self.grid_h),
+            self.max_points, self.threads)
+        feats, n = decorate(
+            vox, npts, coords, self.range, self.voxel, self.max_pillars,
+            self.abs_xyz, self.with_distance, self.threads)
+        self.dropped_pillars = max(0, len(vox) - self.max_pillars)
+        pillar = self.pfn.run(None, {self.pfn_in: feats})[0]
+        bev = scatter(pillar, coords, n, self.grid_w, self.grid_h)
+        t1 = time.perf_counter()
+        logits = self.bev.run(None, {self.bev_in: bev})[0][0, 0]
         self.last_timings_ms = ((t1 - t0) * 1000.0,
                                 (time.perf_counter() - t1) * 1000.0)
         logits = np.clip(logits, -80.0, 80.0)

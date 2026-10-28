@@ -20,10 +20,20 @@ import time
 import array
 import threading
 import json
+
 from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+
+# Make the training package importable before importing its submodules.  This
+# file is commonly launched directly rather than with `python -m`.
+DNN_ROOT = os.environ.get(
+    "DNN_ROOT",
+    "/home/ubuntu/shared/seg_dataset_gen/lidar",
+)
+if DNN_ROOT not in sys.path:
+    sys.path.insert(0, DNN_ROOT)
 
 import rclpy
 from rclpy.node import Node
@@ -40,17 +50,10 @@ from nav_msgs.msg import OccupancyGrid
 from geometry_msgs.msg import Pose, Point, Quaternion
 from pc_transform_cpp.msg import AlignedCloudWithPose
 
-
-# ---------------------------------------------------------------------------
-# Make the training package importable.
-# ---------------------------------------------------------------------------
-DNN_ROOT = os.environ.get(
-    "DNN_ROOT",
-    "/home/ubuntu/shared/seg_dataset_gen/lidar",
+from gnd_seg_dnn.onnx_runtime import (
+    StaticPillarOnnxModel,
+    DynamicPillarOnnxModel,
 )
-if DNN_ROOT not in sys.path:
-    sys.path.insert(0, DNN_ROOT)
-
 from gnd_seg_dnn.bev_ops import coverage_kernel_size, dilate_bev_mask
 
 
@@ -148,7 +151,7 @@ class DNNInferenceNode(Node):
         self._infer_count = 0
         self._last_infer_count = 0
 
-        self.log_exec_time = False
+        self.log_exec_time = True
         self._enc_ms = 0.0
         self._net_ms = 0.0
 
@@ -234,8 +237,6 @@ class DNNInferenceNode(Node):
         return model
 
     def _load_onnx_model(self):
-        from gnd_seg_dnn.onnx_runtime import OnnxRuntimeModel
-
         model_path_value = os.environ.get("DNN_ONNX_MODEL")
         if not model_path_value:
             raise ValueError("Set DNN_ONNX_MODEL to the exported bev_net.onnx")
@@ -244,20 +245,25 @@ class DNNInferenceNode(Node):
             raise FileNotFoundError(f"ONNX model not found: {model_path}")
         export_dir = model_path.parent
         config_path = Path(os.environ.get("DNN_CONFIG", export_dir / "config.json"))
-        encoder_path = Path(os.environ.get("DNN_ENCODER", export_dir / "pillar_vfe.npz"))
-        for path in (config_path, encoder_path):
-            if not path.is_file():
-                raise FileNotFoundError(f"ONNX runtime asset not found: {path}")
-
         with config_path.open() as stream:
             config = json.load(stream)
+        static_vfe = config.get("vfe_type") == "static"
+        encoder_path = Path(os.environ.get("DNN_ENCODER", export_dir / "pillar_vfe.npz"))
+        pfn_path = Path(os.environ.get("DNN_PFN", export_dir / "pfn.onnx"))
+        required = (config_path, pfn_path) if static_vfe else (config_path, encoder_path)
+        for path in required:
+            if not path.is_file():
+                raise FileNotFoundError(f"ONNX runtime asset not found: {path}")
         if config.get("model_variant") not in ("lite", "heightmap"):
             raise ValueError("ONNX backend requires a lite or heightmap export")
         self.cfg = SimpleNamespace(**config)
         self.cfg.grid_w = int(round((self.cfg.x_max - self.cfg.x_min) / self.cfg.cell_size))
         self.cfg.grid_h = int(round((self.cfg.y_max - self.cfg.y_min) / self.cfg.cell_size))
         self.get_logger().info(f"Loading CPU ONNX model from {model_path}")
-        return OnnxRuntimeModel(model_path, encoder_path, self.cfg.model_variant)
+        if static_vfe:
+            return StaticPillarOnnxModel(export_dir, self.cfg,
+                                         bev_path=model_path, pfn_path=pfn_path)
+        return DynamicPillarOnnxModel(model_path, encoder_path, self.cfg.model_variant)
 
     # -----------------------------------------------------------------------
     # Inference — unchanged
@@ -269,6 +275,12 @@ class DNNInferenceNode(Node):
         if self.backend == "onnx":
             prob = self.model(xyz_aligned)
             self._enc_ms, self._net_ms = self.model.last_timings_ms
+            dropped = getattr(self.model, "dropped_pillars", 0)
+            if dropped:
+                self.get_logger().warning(
+                    f"{dropped} pillars exceed max_pillars and were dropped; "
+                    f"re-export with a larger --max-pillars",
+                    throttle_duration_sec=5.0)
             return prob
 
         torch = self.torch

@@ -2,6 +2,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
@@ -9,7 +10,7 @@ def generate_launch_description():
     declared_args = [
         DeclareLaunchArgument(
             'input_cloud_topic',
-            default_value='/sim_lidar/pointcloud/downsampled',
+            default_value='/sim_lidar/pointcloud/points',
             description='Input point cloud topic'),
         DeclareLaunchArgument(
             'output_cloud_topic',
@@ -27,6 +28,10 @@ def generate_launch_description():
             'drone_frame',
             default_value='iris_with_lidar',
             description='Drone base frame'),
+        DeclareLaunchArgument(
+            'voxel_leaf_size',
+            default_value='0.1',
+            description='Voxel grid leaf size in meters (<=0 disables)'),
         DeclareLaunchArgument(
             'ground_z',
             default_value='0.0',
@@ -81,6 +86,7 @@ def generate_launch_description():
             'world_frame':        LaunchConfiguration('world_frame'),
             'lidar_frame':        LaunchConfiguration('lidar_frame'),
             'drone_frame':        LaunchConfiguration('drone_frame'),
+            'voxel_leaf_size':    ParameterValue(LaunchConfiguration('voxel_leaf_size'), value_type=float),
             'ground_z':           LaunchConfiguration('ground_z'),
             'origin_mode':        LaunchConfiguration('origin_mode'),
             'ground_band':        LaunchConfiguration('ground_band'),

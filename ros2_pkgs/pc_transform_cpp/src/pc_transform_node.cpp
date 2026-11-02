@@ -39,6 +39,10 @@
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp/qos.hpp>
 
+#include <pcl/filters/voxel_grid.h>
+#include <pcl/PCLPointCloud2.h>
+#include <pcl_conversions/pcl_conversions.h>
+
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <sensor_msgs/msg/point_field.hpp>
 #include <sensor_msgs/point_cloud2_iterator.hpp>
@@ -271,7 +275,8 @@ public:
     AlignCloudNode() : rclcpp::Node("align_cloud_node") {
         // Parameters
         declare_parameter<std::string>("input_cloud_topic",
-            "/sim_lidar/pointcloud/downsampled");
+            "/sim_lidar/pointcloud/points");
+        declare_parameter<double>("voxel_leaf_size", 0.1);
         declare_parameter<std::string>("output_cloud_topic",
             "/sim_lidar/pointcloud/aligned");
         declare_parameter<std::string>("output_aligned_topic",
@@ -303,8 +308,8 @@ public:
         declare_parameter<std::string>("output_dir", "/tmp/dnn_dataset");
         declare_parameter<std::string>("filename_prefix", "cloud_");
 
-        declare_parameter<int>("subscription_depth", 20);
-        declare_parameter<int>("writer_queue_size", 200);
+        declare_parameter<int>("subscription_depth", 10);
+        declare_parameter<int>("writer_queue_size", 100);
         declare_parameter<bool>("drop_when_full", false);
 
         // Read parameters
@@ -312,6 +317,7 @@ public:
         lidar_frame_   = get_parameter("lidar_frame").as_string();
         drone_frame_   = get_parameter("drone_frame").as_string();
         ground_z_      = get_parameter("ground_z").as_double();
+        voxel_leaf_size_ = get_parameter("voxel_leaf_size").as_double();
 
         auto axis = get_parameter("forward_axis").as_double_array();
         double n2 = 0.0;
@@ -360,22 +366,18 @@ public:
         tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
 
         // Publisher
-        auto pub_qos = rclcpp::SensorDataQoS();
+        auto qos = rclcpp::SensorDataQoS();
         cloud_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>(
-            get_parameter("output_cloud_topic").as_string(), pub_qos);
+            get_parameter("output_cloud_topic").as_string(), qos);
 
         // This one publishes the same cloud but with pose information
         // It is to be used by the DNN for inference and global occupancy mapping
         aligned_pub_ = create_publisher<pc_transform_cpp::msg::AlignedCloudWithPose>(
-            get_parameter("output_aligned_topic").as_string(), pub_qos);
+            get_parameter("output_aligned_topic").as_string(), qos);
 
         // Subscriber
-        auto sub_qos = rclcpp::QoS(rclcpp::KeepLast(subscription_depth_))
-                           .reliability(rclcpp::ReliabilityPolicy::BestEffort)
-                           .durability(rclcpp::DurabilityPolicy::Volatile);
         cloud_sub_ = create_subscription<sensor_msgs::msg::PointCloud2>(
-            get_parameter("input_cloud_topic").as_string(),
-            sub_qos,
+            get_parameter("input_cloud_topic").as_string(), qos,
             std::bind(&AlignCloudNode::cloud_callback, this, std::placeholders::_1));
 
         // Writer thread
@@ -438,8 +440,29 @@ private:
         }
     }
 
+    // Same filter pcl_ros::VoxelGrid wraps (single-threaded in PCL).
+    // All fields are averaged per voxel; non-finite points are dropped.
+    sensor_msgs::msg::PointCloud2::ConstSharedPtr voxel_filter(
+        const sensor_msgs::msg::PointCloud2::ConstSharedPtr & in) const {
+        if (voxel_leaf_size_ <= 0.0) return in;
+        pcl::PCLPointCloud2::Ptr pcl_in(new pcl::PCLPointCloud2);
+        pcl_conversions::toPCL(*in, *pcl_in);
+        pcl::PCLPointCloud2 pcl_out;
+        pcl::VoxelGrid<pcl::PCLPointCloud2> vg;
+        vg.setInputCloud(pcl_in);
+        vg.setLeafSize(static_cast<float>(voxel_leaf_size_),
+                       static_cast<float>(voxel_leaf_size_),
+                       static_cast<float>(voxel_leaf_size_));
+        vg.filter(pcl_out);
+        auto out = std::make_shared<sensor_msgs::msg::PointCloud2>();
+        pcl_conversions::moveFromPCL(pcl_out, *out);
+        out->header = in->header;
+        return out;
+    }
+
     // ---- main pipeline ----
-    void process_cloud(const sensor_msgs::msg::PointCloud2::ConstSharedPtr & cloud_msg) {
+    void process_cloud(const sensor_msgs::msg::PointCloud2::ConstSharedPtr & raw_msg) {
+        const auto cloud_msg = voxel_filter(raw_msg);
         //const auto start = std::chrono::steady_clock::now(); // DEBUG
         const rclcpp::Time stamp(cloud_msg->header.stamp);
 
@@ -478,12 +501,12 @@ private:
         }
         auto fint = find_field(*cloud_msg, "intensity");
 
-        const size_t n = static_cast<size_t>(cloud_msg->width) * cloud_msg->height;
-        std::vector<double> x(n), y(n), z(n), intensity(n, 0.0);
+        const size_t n_raw = static_cast<size_t>(cloud_msg->width) * cloud_msg->height;
+        std::vector<double> x(n_raw), y(n_raw), z(n_raw), intensity(n_raw, 0.0);
         {
             const uint8_t * data = cloud_msg->data.data();
             const size_t step = cloud_msg->point_step;
-            for (size_t i = 0; i < n; ++i) {
+            for (size_t i = 0; i < n_raw; ++i) {
                 const uint8_t * base = data + i * step;
                 x[i] = read_field_as_double(base, fx);
                 y[i] = read_field_as_double(base, fy);
@@ -491,6 +514,8 @@ private:
                 if (fint.present) intensity[i] = read_field_as_double(base, fint);
             }
         }
+
+        const size_t n = n_raw;
 
         // 4. Transform points into world frame (raw loop).
         std::vector<double> xw(n), yw(n), zw(n);
@@ -872,13 +897,14 @@ private:
     std::string output_dir_ = "/tmp/dnn_dataset";
     std::string filename_prefix_ = "cloud_";
 
-    int subscription_depth_ = 1000;
-    int writer_queue_size_ = 100000;
+    int subscription_depth_ = 10;
+    int writer_queue_size_ = 100;
     bool drop_when_full_ = false;
 
     std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
     std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
 
+    double voxel_leaf_size_ = 0.1;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_pub_;
     rclcpp::Publisher<pc_transform_cpp::msg::AlignedCloudWithPose>::SharedPtr aligned_pub_;
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_sub_;

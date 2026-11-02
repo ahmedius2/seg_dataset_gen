@@ -15,6 +15,8 @@ find_package(rosidl_default_generators REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
+find_package(pcl_conversions REQUIRED)
+find_package(PCL REQUIRED COMPONENTS common filters)
 find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
 
@@ -24,10 +26,12 @@ rosidl_generate_interfaces(${PROJECT_NAME}
 )
 
 add_executable(pc_transform_node src/pc_transform_node.cpp)
+target_include_directories(pc_transform_node PRIVATE ${PCL_INCLUDE_DIRS} ${pcl_conversions_INCLUDE_DIRS})
 target_link_libraries(pc_transform_node
   rclcpp::rclcpp
   ${sensor_msgs_TARGETS}
   tf2::tf2
+  ${PCL_LIBRARIES}
   tf2_ros::tf2_ros
 )
 

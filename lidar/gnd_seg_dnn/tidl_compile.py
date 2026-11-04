@@ -15,6 +15,7 @@ DNN_TIDL_ARTIFACTS=<dir containing pfn/ and bev/>.
 import argparse
 import json
 import os
+import multiprocessing as mp
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -26,6 +27,7 @@ import onnxruntime as ort
 from .model.pillar_ops import decorate, scatter, voxelize
 from .ply_io import load_cloud as load_ply_cloud
 
+os.environ["TIDL_RT_PERFSTATS"] = "1"
 
 def load_cloud(path):
     if path.suffix == ".npy":
@@ -69,7 +71,7 @@ def make_calibration(cfg, pfn_sess, clouds):
     return pfn_in, bev_in
 
 
-def compile_model(onnx_path, art_dir, inputs, args):
+def compile_model(onnx_path, art_dir, inputs, args, bits=None):
     art_dir.mkdir(parents=True, exist_ok=True)
     # TIDL import needs every tensor shape in the graph; torch export omits them.
     inferred = Path(tempfile.mkdtemp()) / f"{onnx_path.stem}.onnx"
@@ -81,11 +83,11 @@ def compile_model(onnx_path, art_dir, inputs, args):
     opts = {
         "tidl_tools_path": args.tidl_tools,
         "artifacts_folder": str(art_dir),
-        "tensor_bits": args.bits,
+        "tensor_bits": bits or args.bits,
         "accuracy_level": 1,
-        "debug_level": args.debug_level,
+        "debug_level": args.debug_level,                     # <-- was 3
         "advanced_options:calibration_frames": n,
-        "advanced_options:calibration_iterations": args.calib_iters,
+        "advanced_options:calibration_iterations": min(args.calib_iters, n),  # <-- clamp
     }
     so = ort.SessionOptions()
     sess = ort.InferenceSession(
@@ -97,6 +99,20 @@ def compile_model(onnx_path, art_dir, inputs, args):
     print(f"compiled {onnx_path.name} -> {art_dir} ({n} calibration frames)")
 
 
+def _compile_worker(*a):
+    compile_model(*a)
+
+
+def compile_isolated(*a):
+    """TIDL's emulated device memory is not released when a session is freed, so a
+    second compile in the same process dies with 'partially present on the device'."""
+    p = mp.get_context("spawn").Process(target=_compile_worker, args=a)
+    p.start()
+    p.join()
+    if p.exitcode:
+        raise SystemExit(f"TIDL compile of {a[0].name} failed (exit code {p.exitcode})")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawTextHelpFormatter)
@@ -106,6 +122,9 @@ def main():
     ap.add_argument("--out", default="tidl_artifacts")
     ap.add_argument("--num-frames", type=int, default=20)
     ap.add_argument("--bits", type=int, default=8, choices=(8, 16))
+    ap.add_argument("--pfn-bits", type=int, default=16, choices=(8, 16),
+                    help="PFN precision. Its output is post-ReLU (unsigned); at 8 bit the "
+                         "TIDL import hangs in TIDL_runtimesPostProcessNet")
     ap.add_argument("--calib-iters", type=int, default=10)
     ap.add_argument("--debug-level", type=int, default=0)
     ap.add_argument("--tidl-tools", default=os.environ.get("TIDL_TOOLS_PATH"))
@@ -124,8 +143,8 @@ def main():
     pfn_sess = ort.InferenceSession(str(pfn_path),
                                     providers=["CPUExecutionProvider"])
     pfn_in, bev_in = make_calibration(cfg, pfn_sess, clouds)
-    compile_model(pfn_path, out / "pfn", pfn_in, args)
-    compile_model(bev_path, out / "bev", bev_in, args)
+    compile_isolated(pfn_path, out / "pfn", pfn_in, args, args.pfn_bits)
+    compile_isolated(bev_path, out / "bev", bev_in, args)
 
 
 if __name__ == "__main__":

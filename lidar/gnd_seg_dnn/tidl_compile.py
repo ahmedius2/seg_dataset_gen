@@ -1,4 +1,4 @@
-"""Compile pfn.onnx / bev_net.onnx for the AM67A C7x with TI edgeai-tidl-tools.
+"""Compile static-pillar or StatPillars BEV networks for AM67A C7x.
 
 Run on an x86 PC (not on the board) inside the edgeai-tidl-tools OSRT
 environment (onnxruntime with TIDLCompilationProvider, TIDL_TOOLS_PATH set):
@@ -23,6 +23,7 @@ import onnx
 import onnxruntime as ort
 
 from .model.pillar_ops import decorate, scatter, vfe_feature_opts, voxelize
+from .onnx_runtime import StatPillarsEncoderNP
 from .config import load_yaml_mapping
 from .ply_io import load_cloud as load_ply_cloud
 
@@ -69,6 +70,12 @@ def make_calibration(cfg, pfn_sess, clouds):
     return pfn_in, bev_in
 
 
+def make_statpillars_calibration(export_dir, clouds):
+    """Run the deployed CPU encoder to generate BEV calibration inputs."""
+    encoder = StatPillarsEncoderNP(export_dir / "pillar_vfe.npz")
+    return [encoder(load_cloud(path)) for path in clouds]
+
+
 def compile_model(onnx_path, art_dir, inputs, args, bits=None, extra_opts=None):
     art_dir.mkdir(parents=True, exist_ok=True)
     # TIDL import needs every tensor shape in the graph; torch export omits them.
@@ -93,6 +100,11 @@ def compile_model(onnx_path, art_dir, inputs, args, bits=None, extra_opts=None):
         str(onnx_path), sess_options=so,
         providers=["TIDLCompilationProvider", "CPUExecutionProvider"],
         provider_options=[opts, {}])
+    # TI's ONNX Runtime 1.15 reports the compilation provider as
+    # TIDLExecutionProvider after session initialization.
+    if not ({"TIDLCompilationProvider", "TIDLExecutionProvider"}
+            & set(sess.get_providers())):
+        raise RuntimeError(f"TIDLCompilationProvider failed to initialize for {onnx_path}")
     for x in inputs:
         sess.run(None, {name: x})
     print(f"compiled {onnx_path.name} -> {art_dir} ({n} calibration frames)")
@@ -138,8 +150,16 @@ def main():
         ap.error("set --tidl-tools or TIDL_TOOLS_PATH (edgeai-tidl-tools/tidl_tools)")
 
     export_dir = Path(args.run_dir) / "onnx"
+    cfg = load_cfg(export_dir)
+    statpillars = cfg.model_variant in ("statpillars", "heightmap")
+    if not statpillars and (cfg.model_variant != "lite" or cfg.vfe_type != "static"):
+        ap.error("TIDL compilation requires a static lite or StatPillars model")
+    if statpillars and (args.skip_pfn or args.pfn_deny_types or args.pfn_deny_names):
+        ap.error("PFN options do not apply to StatPillars; its encoder runs on the CPU")
+    if args.num_frames < 1 or args.calib_iters < 1:
+        ap.error("--num-frames and --calib-iters must be positive")
     out = export_dir / "tidl_artifacts"
-    for name in (("bev",) if args.skip_pfn else ("pfn", "bev")):
+    for name in (("bev",) if statpillars or args.skip_pfn else ("pfn", "bev")):
         target = out / name
         if target.exists() and (not target.is_dir() or any(target.iterdir())):
             ap.error(f"artifact directory already exists and is not empty: {target}; "
@@ -149,8 +169,13 @@ def main():
     if not clouds:
         ap.error(f"no .ply, .npy, or .bin clouds in {args.calib_dir}")
 
-    cfg = load_cfg(export_dir)
-    pfn_path, bev_path = export_dir / "pfn.onnx", export_dir / "bev_net.onnx"
+    bev_path = export_dir / "bev_net.onnx"
+    if statpillars:
+        bev_in = make_statpillars_calibration(export_dir, clouds)
+        compile_isolated(bev_path, out / "bev", bev_in, args)
+        return
+
+    pfn_path = export_dir / "pfn.onnx"
     pfn_sess = ort.InferenceSession(str(pfn_path),
                                     providers=["CPUExecutionProvider"])
     pfn_in, bev_in = make_calibration(cfg, pfn_sess, clouds)

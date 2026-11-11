@@ -15,10 +15,13 @@ def _cbr(cin, cout, k=3, s=1):
 
 
 class LiteBEVNet(nn.Module):
-    def __init__(self, in_ch=32, chans=(32, 64, 128), mid=64, head_ch=32):
+    def __init__(self, in_ch=32, chans=(32, 64, 128), mid=64, head_ch=32,
+                 input_projection=False):
         super().__init__()
         c1, c2, c3 = chans
-        self.s1 = nn.Sequential(_cbr(in_ch, c1, s=2), _cbr(c1, c1))
+        self.input_projection = (nn.Conv2d(in_ch, 32, kernel_size=1, bias=False)
+                                 if input_projection else nn.Identity())
+        self.s1 = nn.Sequential(_cbr(32 if input_projection else in_ch, c1, s=2), _cbr(c1, c1))
         self.s2 = nn.Sequential(_cbr(c1, c2, s=2), _cbr(c2, c2), _cbr(c2, c2))
         self.s3 = nn.Sequential(_cbr(c2, c3, s=2), _cbr(c3, c3), _cbr(c3, c3))
         # 1x1 at low resolution first, then resize: much cheaper than ConvTranspose
@@ -33,6 +36,7 @@ class LiteBEVNet(nn.Module):
         self.up_out = nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False)
 
     def forward(self, x):
+        x = self.input_projection(x)
         f1 = self.s1(x)
         f2 = self.s2(f1)
         f3 = self.s3(f2)

@@ -4,7 +4,7 @@ import time
 from pathlib import Path
 import onnxruntime as ort
 import numpy as np
-from .model.pillar_ops import scatter, decorate, vfe_feature_opts, voxelize
+from .model.pillar_ops import scatter, decorate, pillar_statistics, vfe_feature_opts, voxelize
 
 class PillarEncoderNP:
     def __init__(self, npz_path):
@@ -60,36 +60,52 @@ class PillarEncoderNP:
         return dense.reshape(1, self.channels, self.ny, self.nx)
 
 
-class HeightMapEncoderNP:
-    def __init__(self, npz_path):
+class StatPillarsEncoderNP:
+    def __init__(self, npz_path, num_threads=None):
         data = np.load(npz_path)
+        if "projection_bias" in data:
+            raise ValueError("This StatPillars export uses the old biased projection; "
+                             "retrain and export a bias-free model")
+        if "projection_weight" in data:
+            raise ValueError("This StatPillars export uses the old CPU projection; "
+                             "retrain and re-export the model")
         self.x_min, self.y_min = map(float, data["origin"])
         self.cell = float(data["cell"])
         self.nx, self.ny = map(int, data["grid"])
-        self.clip = float(data["clip"])
+        point_range = data["point_cloud_range"].astype(np.float32)
+        self.point_range = point_range
+        self.voxel_size = [self.cell, self.cell, float(point_range[5] - point_range[2])]
+        self.max_points = int(data["max_points"])
+        self.num_threads = int(data["num_threads"]) if num_threads is None else num_threads
 
     def __call__(self, points):
-        ix = np.floor((points[:, 0] - self.x_min) / self.cell).astype(np.int64)
-        iy = np.floor((points[:, 1] - self.y_min) / self.cell).astype(np.int64)
-        inside = ((ix >= 0) & (ix < self.nx) & (iy >= 0) & (iy < self.ny))
-        flat = iy[inside] * self.nx + ix[inside]
-        heights = np.clip(points[inside, 2], -self.clip, self.clip) / (2 * self.clip) + 0.5
-        result = np.full(self.ny * self.nx, -1.0, np.float32)
-        order = np.lexsort((heights, flat))
-        result[flat[order]] = heights[order]
-        return result.reshape(1, 1, self.ny, self.nx)
+        points = np.asarray(points, dtype=np.float32)
+        batched = np.zeros((len(points), 4), dtype=np.float32)
+        batched[:, 1:] = points[:, :3]
+        stats, _ = pillar_statistics(
+            batched, self.point_range, self.voxel_size, (self.nx, self.ny),
+            self.max_points, self.num_threads, 1)
+        return stats
 
 
 class DynamicPillarOnnxModel:
-    def __init__(self, model_path, encoder_path, model_variant):
+    def __init__(self, model_path, encoder_path, model_variant, num_threads=None,
+                 tidl_artifacts=None):
 
         model_path = Path(model_path)
-        encoder_cls = (HeightMapEncoderNP if model_variant == "heightmap"
+        encoder_cls = (StatPillarsEncoderNP if model_variant == "statpillars"
                        else PillarEncoderNP)
-        self.encoder = encoder_cls(encoder_path)
-        self.session = ort.InferenceSession(
-            str(model_path), providers=["CPUExecutionProvider"]
-        )
+        self.encoder = (encoder_cls(encoder_path, num_threads)
+                        if model_variant == "statpillars" else encoder_cls(encoder_path))
+        if tidl_artifacts is None:
+            self.session = ort.InferenceSession(
+                str(model_path), providers=["CPUExecutionProvider"])
+        else:
+            self.session = ort.InferenceSession(
+                str(model_path), providers=["TIDLExecutionProvider", "CPUExecutionProvider"],
+                provider_options=[{"artifacts_folder": str(tidl_artifacts), "debug_level": 0}, {}])
+            if "TIDLExecutionProvider" not in self.session.get_providers():
+                raise RuntimeError(f"TIDLExecutionProvider failed to initialize for {model_path}")
         self.input_name = self.session.get_inputs()[0].name
         self.output_name = self.session.get_outputs()[0].name
         self.last_timings_ms = (0.0, 0.0)  # (encoding, network)

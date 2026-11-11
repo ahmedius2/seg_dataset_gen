@@ -40,6 +40,8 @@ class OnnxEvaluationModel:
 def model_logits(model, points, batch_size):
     if isinstance(model, OnnxEvaluationModel):
         return model.predict_batch(points, batch_size)
+    if hasattr(model, "encoder") and hasattr(model.encoder, "max_points_per_voxel"):
+        return model(points, batch_size=batch_size)
     return model(points)
 
 
@@ -60,7 +62,8 @@ def evaluate(model, loader, criterion, device, cfg, threshold=0.5,
     per_frame = []
 
     for pts, tgt, wgt, metas in loader:
-        pts = pts.to(device, non_blocking=True)
+        if cfg.model_variant != "statpillars":
+            pts = pts.to(device, non_blocking=True)
         tgt = tgt.to(device, non_blocking=True)
         wgt = wgt.to(device, non_blocking=True)
 
@@ -138,7 +141,8 @@ def sweep_thresholds(model, loader, device, cfg, thresholds=None):
 
     with torch.no_grad():
         for pts, tgt, wgt, _ in loader:
-            pts = pts.to(device, non_blocking=True)
+            if cfg.model_variant != "statpillars":
+                pts = pts.to(device, non_blocking=True)
             tgt = tgt.to(device, non_blocking=True)
             wgt = wgt.to(device, non_blocking=True)
 
@@ -216,9 +220,12 @@ def main():
         if args.voxelizer_threads is not None:
             if args.voxelizer_threads < 1:
                 parser.error("--voxelizer-threads must be positive")
-            if cfg.vfe_type != "static" or cfg.model_variant == "heightmap":
-                parser.error("--voxelizer-threads requires a static pillar model")
-            model.vfe.num_threads = args.voxelizer_threads
+            if cfg.model_variant == "statpillars":
+                model.encoder.num_threads = args.voxelizer_threads
+            elif cfg.vfe_type == "static":
+                model.vfe.num_threads = args.voxelizer_threads
+            else:
+                parser.error("--voxelizer-threads requires a static or StatPillars model")
     else:
         if args.device != "auto":
             parser.error("--device applies only to the torch backend")

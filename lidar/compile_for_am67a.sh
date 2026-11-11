@@ -5,10 +5,11 @@ pushd ../../edgeai-tidl-tools
 source setup_env.sh am67a
 popd
 
-rm -rf single_z16/onnx
-python -m gnd_seg_dnn.export_onnx --run-dir single_z16 \
+MODEL_DIR=statpillars_xyz_stats_04
+rm -rf ${MODEL_DIR}/onnx
+python -m gnd_seg_dnn.export_onnx --run-dir ${MODEL_DIR} \
         --single-pool
-python3 -m gnd_seg_dnn.tidl_compile --run-dir single_z16 \
+python3 -m gnd_seg_dnn.tidl_compile --run-dir ${MODEL_DIR} \
 	--calib-dir /home/root/shared/dnn_dataset/scene_0000_0 \
 	--debug-level 1 --bits 16
 #        --pfn-deny-types MaxPool,Concat,Relu,ReduceMax,Expand,Constant,ConstantOfShape,Mul,Equal,Where

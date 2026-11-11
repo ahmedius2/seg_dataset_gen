@@ -15,7 +15,7 @@ def inference_parser():
     parser.add_argument("--amp", action=argparse.BooleanOptionalAction, default=None,
                         help="enable or disable CUDA mixed precision for Torch (default: enabled on CUDA)")
     parser.add_argument("--voxelizer-threads", type=int,
-                        help="override the static CPU voxelizer thread count")
+                        help="override the static or StatPillars CPU voxelizer thread count")
     parser.add_argument("--pfn-on-cpu", action="store_true",
                         help="with TIDL, run the PFN on the CPU")
     parser.add_argument("--world-frame", default="scene_0000_0")
@@ -45,8 +45,8 @@ def load_run_model(args):
     run = Path(args.run_dir)
     cfg = Config.from_yaml(run / "config.yaml")
     if args.voxelizer_threads is not None:
-        if cfg.vfe_type != "static" or cfg.model_variant == "heightmap":
-            raise ValueError("--voxelizer-threads requires a static pillar model")
+        if cfg.model_variant != "statpillars" and cfg.vfe_type != "static":
+            raise ValueError("--voxelizer-threads requires a static or StatPillars model")
         cfg.voxelizer_threads = args.voxelizer_threads
     if args.backend == "torch":
         import torch
@@ -77,8 +77,8 @@ def load_run_model(args):
     bev = onnx_dir / "bev_net.onnx"
     if not bev.is_file():
         raise FileNotFoundError(f"ONNX model not found: {bev}")
-    if export_cfg.model_variant not in ("lite", "heightmap"):
-        raise ValueError("ONNX backend requires a lite or heightmap model")
+    if export_cfg.model_variant not in ("lite", "statpillars"):
+        raise ValueError("ONNX backend requires a lite or statpillars model")
     if export_cfg.vfe_type == "static" and export_cfg.model_variant == "lite":
         pfn = onnx_dir / "pfn.onnx"
         if not pfn.is_file():
@@ -96,9 +96,20 @@ def load_run_model(args):
                                       pfn_on_cpu=args.pfn_on_cpu)
         return model, export_cfg, "TIDL" if artifacts else "CPU (ONNX Runtime)"
 
+    artifacts = None
     if args.backend == "tidl":
-        raise ValueError("TIDL inference requires a static lite model")
+        if export_cfg.model_variant != "statpillars":
+            raise ValueError("TIDL inference requires a static lite or StatPillars model")
+        if args.pfn_on_cpu:
+            raise ValueError("--pfn-on-cpu does not apply to StatPillars")
+        if "TIDLExecutionProvider" not in ort.get_available_providers():
+            raise RuntimeError("TIDLExecutionProvider is not available in ONNX Runtime")
+        artifacts = onnx_dir / "tidl_artifacts" / "bev"
+        if not artifacts.is_dir() or not any(artifacts.iterdir()):
+            raise FileNotFoundError(f"TIDL artifacts missing or empty: {artifacts}")
     encoder = onnx_dir / "pillar_vfe.npz"
     if not encoder.is_file():
         raise FileNotFoundError(f"ONNX encoder not found: {encoder}")
-    return DynamicPillarOnnxModel(bev, encoder, export_cfg.model_variant), export_cfg, "CPU (ONNX Runtime)"
+    return DynamicPillarOnnxModel(bev, encoder, export_cfg.model_variant,
+                                  export_cfg.voxelizer_threads, artifacts), export_cfg, (
+                                      "TIDL" if artifacts else "CPU (ONNX Runtime)")

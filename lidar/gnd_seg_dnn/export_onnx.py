@@ -17,7 +17,7 @@ import torch
 
 from .config import Config
 from .train import build_model
-from .onnx_runtime import HeightMapEncoderNP, PillarEncoderNP
+from .onnx_runtime import StatPillarsEncoderNP, PillarEncoderNP
 
 
 def _fold(linear, bn):
@@ -147,7 +147,7 @@ def main():
     ckpt = torch.load(run_dir / "best.pt", map_location="cpu", weights_only=False)
     cfg = Config.from_yaml(run_dir / "config.yaml")
     cfg.assert_model_compatible(Config.from_dict(ckpt["config"]))
-    assert cfg.model_variant in ("lite", "heightmap"), "checkpoint is not an embedded variant"
+    assert cfg.model_variant in ("lite", "statpillars"), "checkpoint is not an embedded variant"
 
     if args.max_pillars is not None:
         if args.max_pillars < 1:
@@ -168,11 +168,14 @@ def main():
         _export_static(cfg, model, out, args.opset, args.single_pool)
         return
 
-    if cfg.model_variant == "heightmap":
+    if cfg.model_variant == "statpillars":
         np.savez(out / "pillar_vfe.npz", origin=np.array([cfg.x_min, cfg.y_min], np.float32),
-                 cell=np.float32(cfg.cell_size), clip=np.float32(cfg.height_clip),
-                 grid=np.array([cfg.grid_w, cfg.grid_h], np.int32))
-        c = 1
+                 cell=np.float32(cfg.cell_size),
+                 point_cloud_range=np.array(cfg.point_cloud_range, np.float32),
+                 grid=np.array([cfg.grid_w, cfg.grid_h], np.int32),
+                 max_points=np.int32(cfg.max_points_per_voxel),
+                 num_threads=np.int32(cfg.voxelizer_threads))
+        c = 15
     else:
         p1, p2 = model.vfe.pfn_layers
         w1, b1 = _fold(p1.linear, p1.norm)
@@ -194,10 +197,13 @@ def main():
 
     # Sanity check: NumPy encoder + dense net vs. full torch model.
     pts = np.random.uniform([-6, -25, -2], [6, 25, 2], (20000, 3)).astype(np.float32)
-    ref = model(torch.cat([torch.zeros(len(pts), 1), torch.from_numpy(pts)], 1))
-    enc_cls = HeightMapEncoderNP if cfg.model_variant == "heightmap" else PillarEncoderNP
+    enc_cls = StatPillarsEncoderNP if cfg.model_variant == "statpillars" else PillarEncoderNP
     enc = enc_cls(out / "pillar_vfe.npz")
+    if cfg.model_variant == "statpillars":
+        model.encoder.num_threads = 1
+        enc.num_threads = 1
     with torch.no_grad():
+        ref = model(torch.cat([torch.zeros(len(pts), 1), torch.from_numpy(pts)], 1))
         got = model.backbone(torch.from_numpy(enc(pts))).squeeze(1)
     print("max |logit diff| numpy-vs-torch:", (ref - got).abs().max().item())
 

@@ -1,0 +1,59 @@
+# Relative XYZ statistics projected to 32 channels; paths are relative to the working directory.
+data_root: /home/ubuntu/shared/dnn_dataset
+file_glob: "**/*.ply"
+val_fraction: 0.2
+test_fraction: 0.0
+split_seed: 1234
+split_by_scene: true
+intensity_lo: 190.0
+intensity_hi: 210.0
+ignore_unobserved: true
+
+x_min: -6.4
+x_max: 6.4
+y_min: -25.6
+y_max: 25.6
+z_min: -10.0
+z_max: 10.0
+cell_size: 0.4
+col_axis: 0
+row_axis: 1
+flip_rows: false
+flip_cols: false
+
+cache_in_memory: true
+aug_z_shift: true
+aug_z_shift_min: -1.0
+aug_z_shift_max: 1.0
+aug_z_invert: true
+aug_z_invert_prob: 0.5
+
+epochs: 100
+batch_size: 8
+lr: 0.002
+weight_decay: 0.0001
+grad_clip: 10.0
+warmup_epochs: 2
+scheduler: cosine
+amp: true
+num_workers: 4
+seed: 0
+loss_type: focal
+focal_alpha: 0.75
+focal_gamma: 2.0
+pos_weight: 1.0
+dice_weight: 0.0
+
+out_dir: statpillars_xyz_stats_04
+log_every: 20
+save_every: 5
+eval_threshold: 0.5
+val_visualizations: 4
+save_visualizations: true
+early_stop_patience: 10
+early_stop_min_delta: 0.001
+
+model_variant: statpillars
+statpillars_projection: true
+max_points_per_voxel: 32
+voxelizer_threads: 4

@@ -27,7 +27,7 @@ from .model.pillar_scatter import PointPillarScatter
 from .model.base_bev_backbone import BaseBEVBackbone
 from .model.centerhead import CenterHead
 from .model.lite_backbone import LiteBEVNet
-from .model.height_encoder import HeightMapEncoder, HeightMapModel
+from .model.statpillars import StatPillarsEncoder, StatPillarsModel
 
 # --------------------------------------------------------------------------- #
 #  Model factory -- replace the body with your pillar backbone
@@ -59,10 +59,12 @@ def build_model(cfg: Config):
     Output must be raw logits, not probabilities.
     """
 
-    if cfg.model_variant == "heightmap":
-        enc = HeightMapEncoder(cfg.x_min, cfg.y_min, cfg.cell_size,
-                               cfg.grid_w, cfg.grid_h, cfg.height_clip)
-        return HeightMapModel(enc, LiteBEVNet(in_ch=1))
+    if cfg.model_variant == "statpillars":
+        enc = StatPillarsEncoder(cfg.x_min, cfg.y_min, cfg.cell_size,
+                                 cfg.grid_w, cfg.grid_h, cfg.point_cloud_range,
+                                 cfg.max_points_per_voxel, cfg.voxelizer_threads)
+        return StatPillarsModel(enc, LiteBEVNet(
+            in_ch=15, input_projection=cfg.statpillars_projection))
 
     vfe_kwargs = dict(model_cfg=cfg.vfe_config, num_point_features=cfg.num_point_features,
                       voxel_size=cfg.pillar_dims, grid_size=cfg.grid_size,
@@ -172,14 +174,16 @@ def run_epoch(model, loader, criterion, device, cfg, optimizer=None,
     ap_sum, ap_n = 0.0, 0
 
     for step, (pts, tgt, wgt, _meta) in enumerate(loader):
-        pts = pts.to(device, non_blocking=True)
+        if cfg.model_variant != "statpillars":
+            pts = pts.to(device, non_blocking=True)
         tgt = tgt.to(device, non_blocking=True)
         wgt = wgt.to(device, non_blocking=True)
 
         with torch.set_grad_enabled(train):
             with torch.autocast(device_type=device.type,
                                 enabled=cfg.amp and device.type == "cuda"):
-                logits = model(pts)
+                logits = (model(pts, batch_size=tgt.shape[0])
+                          if cfg.model_variant == "statpillars" else model(pts))
                 loss = criterion(logits.float(), tgt, wgt)
 
             if train:
@@ -249,7 +253,10 @@ def save_validation_visualizations(model, loader, device, cfg, epoch, out_dir):
     # Iterate over every batch in the loader instead of only the first one.
     for batch_index, batch in enumerate(loader):
         points, target, weight, _ = batch
-        logits = model(points.to(device, non_blocking=True)).float().cpu()
+        if cfg.model_variant == "statpillars":
+            logits = model(points, batch_size=target.shape[0]).float().cpu()
+        else:
+            logits = model(points.to(device, non_blocking=True)).float().cpu()
         probability = torch.sigmoid(logits)
         prediction = probability >= cfg.eval_threshold
 
@@ -408,6 +415,7 @@ def main():
     print(f"[labels] validation batch valid positives={valid_positive}")
 
     model = build_model(cfg).to(device)
+    print(model)
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"[model] {n_params / 1e6:.2f} M trainable parameters")
 

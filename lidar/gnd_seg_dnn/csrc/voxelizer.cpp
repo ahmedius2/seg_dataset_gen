@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -40,6 +41,97 @@ void parallel_for(int num_threads, F&& fn) {
 
 using FloatArray = py::array_t<float, py::array::c_style | py::array::forcecast>;
 using IntArray = py::array_t<int32_t>;
+
+py::tuple pillar_statistics(FloatArray points, std::array<float, 3> range_min,
+                            std::array<float, 3> voxel_size,
+                            std::array<int, 2> grid_size, int max_points,
+                            int num_threads, int batch_size) {
+  if (points.ndim() != 2 || points.shape(1) != 4)
+    throw std::invalid_argument("points must have shape (N, 4): batch, x, y, z");
+  if (max_points <= 0 || num_threads <= 0 || batch_size <= 0)
+    throw std::invalid_argument("max_points, num_threads and batch_size must be positive");
+  if (grid_size[0] <= 0 || grid_size[1] <= 0 ||
+      voxel_size[0] <= 0 || voxel_size[1] <= 0 || voxel_size[2] <= 0)
+    throw std::invalid_argument("grid dimensions and voxel sizes must be positive");
+
+  const int64_t n = points.shape(0);
+  const int64_t nx = grid_size[0], ny = grid_size[1], plane = nx * ny;
+  const int64_t cells = static_cast<int64_t>(batch_size) * plane;
+  const float* pts = points.data();
+  for (int64_t i = 0; i < n; ++i) {
+    const float b = pts[4 * i];
+    if (!std::isfinite(b) || b < 0 || b >= batch_size || std::floor(b) != b)
+      throw std::invalid_argument("batch indices must be integers in [0, batch_size)");
+  }
+  std::vector<std::atomic<int64_t>> counts(cells);
+  for (auto& count : counts) count.store(0, std::memory_order_relaxed);
+  std::vector<float> voxels(static_cast<size_t>(cells) * max_points * 3);
+  py::array_t<float> stats(std::vector<py::ssize_t>{batch_size, 15, ny, nx});
+  py::array_t<int64_t> totals(std::vector<py::ssize_t>{batch_size, ny, nx});
+  float* out = stats.mutable_data();
+  int64_t* total = totals.mutable_data();
+  const int point_threads = static_cast<int>(
+      std::min<int64_t>(num_threads, std::max<int64_t>(1, n)));
+  const int grid_threads = static_cast<int>(std::min<int64_t>(num_threads, nx));
+  {
+    py::gil_scoped_release release;
+    std::fill(out, out + cells * 15, 0.f);
+    parallel_for(point_threads, [&](int t) {
+      for (int64_t i = n * t / point_threads; i < n * (t + 1) / point_threads; ++i) {
+        const float* p = pts + 4 * i;
+        if (!std::isfinite(p[1]) || !std::isfinite(p[2]) || !std::isfinite(p[3]))
+          continue;
+        const float x = std::floor((p[1] - range_min[0]) / voxel_size[0]);
+        const float y = std::floor((p[2] - range_min[1]) / voxel_size[1]);
+        if (!(x >= 0 && x < nx && y >= 0 && y < ny)) continue;
+        const int64_t key = static_cast<int64_t>(p[0]) * plane +
+                            static_cast<int64_t>(y) * nx + static_cast<int64_t>(x);
+        const int64_t slot = counts[key].fetch_add(1, std::memory_order_relaxed);
+        if (slot >= max_points) continue;
+        float* dst = voxels.data() + (key * max_points + slot) * 3;
+        std::copy(p + 1, p + 4, dst);
+      }
+    });
+    parallel_for(grid_threads, [&](int t) {
+      std::vector<float> values(max_points);
+      for (int64_t x = nx * t / grid_threads; x < nx * (t + 1) / grid_threads; ++x) {
+        for (int b = 0; b < batch_size; ++b) {
+          for (int64_t y = 0; y < ny; ++y) {
+            const int64_t key = static_cast<int64_t>(b) * plane + y * nx + x;
+            const int64_t count = counts[key].load(std::memory_order_relaxed);
+            total[key] = count;
+            const int retained = static_cast<int>(std::min<int64_t>(count, max_points));
+            if (!retained) continue;
+            const float center[3] = {
+                static_cast<float>(x) * voxel_size[0] + range_min[0] + voxel_size[0] / 2,
+                static_cast<float>(y) * voxel_size[1] + range_min[1] + voxel_size[1] / 2,
+                range_min[2] + voxel_size[2] / 2};
+            const float* pillar = voxels.data() + key * max_points * 3;
+            for (int axis = 0; axis < 3; ++axis) {
+              float sum = 0;
+              for (int i = 0; i < retained; ++i) {
+                values[i] = pillar[3 * i + axis] - center[axis];
+                sum += values[i];
+              }
+              std::sort(values.begin(), values.begin() + retained);
+              auto quantile = [&](float q) {
+                const float pos = (retained - 1) * q;
+                const int lo = static_cast<int>(pos);
+                const int hi = static_cast<int>(std::ceil(pos));
+                return values[lo] + (values[hi] - values[lo]) * (pos - lo);
+              };
+              const float results[5] = {values[0], quantile(.25f), sum / retained,
+                                        quantile(.75f), values[retained - 1]};
+              for (int s = 0; s < 5; ++s)
+                out[(static_cast<int64_t>(b) * 15 + axis * 5 + s) * plane + y * nx + x] = results[s];
+            }
+          }
+        }
+      }
+    });
+  }
+  return py::make_tuple(stats, totals);
+}
 
 py::tuple voxelize(FloatArray points, std::array<float, 2> range_min,
                    std::array<float, 2> voxel_size, std::array<int, 2> grid_size,
@@ -266,6 +358,10 @@ py::tuple decorate(FloatArray voxels, IntArray64 num_points, IntArray64 coords,
 
 PYBIND11_MODULE(_voxelizer, m) {
   m.doc() = "Multi-threaded pillar voxelizer";
+  m.def("pillar_statistics", &pillar_statistics, py::arg("points"),
+        py::arg("range_min"), py::arg("voxel_size"), py::arg("grid_size"),
+        py::arg("max_points"), py::arg("num_threads"), py::arg("batch_size"),
+        "Return relative XYZ statistics (B,15,H,W) and total counts (B,H,W).");
   m.def("voxelize", &voxelize, py::arg("points"), py::arg("range_min"),
         py::arg("voxel_size"), py::arg("grid_size"), py::arg("max_points"),
         py::arg("num_threads") = 4,

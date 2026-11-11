@@ -201,11 +201,10 @@ class DNNInferenceNode(Node):
             return prob
 
         torch = self.torch
-        pts = torch.as_tensor(
-            xyz_aligned, dtype=torch.float32, device=self.device
-        )
+        point_device = "cpu" if self.cfg.model_variant == "statpillars" else self.device
+        pts = torch.as_tensor(xyz_aligned, dtype=torch.float32, device=point_device)
         batch_idx = torch.zeros(
-            (pts.shape[0], 1), dtype=torch.float32, device=self.device
+            (pts.shape[0], 1), dtype=torch.float32, device=point_device
         )
         model_input = torch.cat([batch_idx, pts], dim=1)
 
@@ -237,6 +236,7 @@ class DNNInferenceNode(Node):
             x = m.scatter(coords, feats)
         else:
             x = m.encoder(model_input)
+            x = x.to(self.device)
         self._sync()
         t1 = time.perf_counter()
         x = m.backbone(x)

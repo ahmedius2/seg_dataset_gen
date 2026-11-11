@@ -2,6 +2,8 @@
 
 from dataclasses import dataclass, field, asdict, fields
 from pathlib import Path
+import warnings
+
 import yaml
 
 
@@ -114,7 +116,7 @@ class Config:
     early_stop_patience: int = 10
     early_stop_min_delta: float = 1e-3
 
-    # Heightmap variant: heights are clipped to +-height_clip metres before scaling.
+    # Retained for compatibility with existing configs; unused by statpillars.
     height_clip: float = 5.0
 
     # "dynamic" = DynamicPillarVFE (all points), "static" = PillarVFE (at most
@@ -124,10 +126,12 @@ class Config:
     # Fixed pillar count of the exported PFN (TIDL needs static shapes);
     # pillars beyond it are dropped at inference. Only utilized when exporting.
     max_pillars: int = 4096
-    voxelizer_threads: int = 4      # C++ voxelizer threads (static VFE on CPU)
+    voxelizer_threads: int = 4      # C++ voxelizer threads (static or StatPillars)
 
-    # "full" = original OpenPCDet-style net, "lite" = TIDL/embedded-friendly net
+    # "full" = original net, "lite" = pillar net, "statpillars" = statistics encoder.
     model_variant: str = "lite"
+    # Optional 15-to-32 channel projection at the start of the StatPillars backbone.
+    statpillars_projection: bool = True
 
     # ---- Derived ----
     grid_h: int = field(init=False, default=0)
@@ -152,6 +156,16 @@ class Config:
         "NUM_UPSAMPLE_FILTERS": [128, 128, 128]}))
 
     def __post_init__(self):
+        if type(self.statpillars_projection) is not bool:
+            raise ValueError("statpillars_projection must be a boolean")
+        if self.model_variant == "heightmap":
+            warnings.warn(
+                "model_variant 'heightmap' is deprecated; use 'statpillars'. "
+                "Pre-statistics heightmap checkpoints must be retrained.",
+                FutureWarning, stacklevel=2)
+            self.model_variant = "statpillars"
+        if self.model_variant not in ("full", "lite", "statpillars"):
+            raise ValueError("model_variant must be 'full', 'lite', or 'statpillars'")
         self.vfe_config = EasyDict(self.vfe_config)
         self.scatter_config = EasyDict(self.scatter_config)
         self.backbone_2d_config = EasyDict(self.backbone_2d_config)
@@ -177,7 +191,9 @@ class Config:
                              "non-final widths must be even")
         if type(self.max_points_per_voxel) is not int or self.max_points_per_voxel < 1:
             raise ValueError("max_points_per_voxel must be a positive integer")
-        if (self.model_variant != "heightmap"
+        if type(self.voxelizer_threads) is not int or self.voxelizer_threads < 1:
+            raise ValueError("voxelizer_threads must be a positive integer")
+        if (self.model_variant != "statpillars"
                 and self.scatter_config.get("NUM_BEV_FEATURES") != filters[-1]):
             raise ValueError("scatter_config.NUM_BEV_FEATURES must match the final PFN width")
         self.grid_w = int(round((self.x_max - self.x_min) / self.cell_size))
@@ -222,9 +238,9 @@ class Config:
         return cfg
 
     @classmethod
-    def heightmap(cls, **kw):
-        cfg = cls(model_variant="heightmap", **kw)
-        cfg.scatter_config = EasyDict({"NUM_BEV_FEATURES": 1})
+    def statpillars(cls, **kw):
+        cfg = cls(model_variant="statpillars", **kw)
+        cfg.scatter_config = EasyDict({"NUM_BEV_FEATURES": 32})
         return cfg
 
     def to_yaml(self, path):
@@ -260,7 +276,10 @@ class Config:
                  "y_min", "y_max", "z_min", "z_max", "col_axis", "row_axis",
                  "flip_cols", "flip_rows", "max_points_per_voxel", "height_clip")
         differences = [name for name in names if getattr(self, name) != getattr(other, name)]
-        if self.model_variant != "heightmap" and other.model_variant != "heightmap":
+        if (self.model_variant == "statpillars" and other.model_variant == "statpillars"
+                and self.statpillars_projection != other.statpillars_projection):
+            differences.append("statpillars_projection")
+        if self.model_variant != "statpillars" and other.model_variant != "statpillars":
             for name in ("scatter_config", "backbone_2d_config"):
                 if getattr(self, name) != getattr(other, name):
                     differences.append(name)

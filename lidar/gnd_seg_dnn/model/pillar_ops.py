@@ -35,6 +35,19 @@ def voxelize(points, point_cloud_range, voxel_size, grid_size,
         [int(grid_size[0]), int(grid_size[1])], int(max_points), int(num_threads))
 
 
+def pillar_statistics(points, point_cloud_range, voxel_size, grid_size,
+                      max_points, num_threads, batch_size):
+    """Return dense relative XYZ statistics and total per-cell point counts."""
+    _require_extension()
+    if not hasattr(_voxelizer, "pillar_statistics"):
+        raise ImportError("C++ voxelizer is out of date; rebuild with "
+                          "`python setup.py build_ext --inplace` in the lidar/ directory")
+    return _voxelizer.pillar_statistics(
+        np.asarray(points, dtype=np.float32), list(point_cloud_range[:3]),
+        list(voxel_size), list(grid_size[:2]), int(max_points),
+        int(num_threads), int(batch_size))
+
+
 def vfe_feature_opts(vfe):
     """Return axis masks and origin-distance flag in canonical xyz order."""
     return (tuple(a in vfe["ABS_POINT_COORDS"] for a in range(3)),

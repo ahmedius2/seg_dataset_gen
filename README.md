@@ -90,6 +90,39 @@ Two pillar encoders are available:
 - `vfe_type: dynamic`: uses every point in a pillar.
 - `vfe_type: static`: keeps at most `max_points_per_voxel` points per pillar, dropping later ones. This is the variant whose pillar network can be compiled by TIDL; see below.
 
+The separate `model_variant: statpillars` encoder computes 15 statistics per
+occupied pillar: minimum, linearly interpolated 25th percentile, mean, 75th
+percentile and maximum for each of x, y and z, relative to the pillar center
+in meters. The z center is the midpoint of the configured z bounds, as in the
+pillar VFE. A multithreaded C++ voxelizer counts all points per pillar but
+stores at most `max_points_per_voxel` (32 in the supplied config); statistics
+are computed from the stored points. When a pillar overflows, atomic slot
+assignment can select different points depending on thread scheduling. The
+encoder produces a 15-channel statistics grid. With `statpillars_projection:
+true` (the default), a bias-free 1x1 convolution at the start of the backbone
+projects it to 32 channels; empty cells remain zero without a mask. Set the
+option to `false` to feed 15 channels directly to the backbone instead.
+Points stay on CPU even during GPU training; only the statistics grid is
+transferred to the model device.
+
+Build the C++ extension on each machine with
+`cd lidar && python setup.py build_ext --inplace`. Rebuild existing extensions
+after updating. Existing StatPillars checkpoints with the projection in the
+encoder are incompatible and must be retrained; re-export ONNX bundles afterward.
+`voxelizer_threads` controls the CPU thread count.
+
+To train and evaluate this model from the `lidar` directory:
+
+```bash
+python -m gnd_seg_dnn.train --config configs/statpillars_xyz_stats_04.yaml
+python -m gnd_seg_dnn.evaluate --run-dir statpillars_xyz_stats_04 --split test
+```
+
+Update `data_root` and `test_fraction` in the YAML for your dataset; the
+test split is empty when `test_fraction` is zero or the scene count is too
+small. If the output directory already exists, training appends a
+number to the new run directory; pass that directory to evaluation.
+
 ```bash
 python -m gnd_seg_dnn.train --config configs/lite_static_04.yaml
 ```
@@ -121,7 +154,9 @@ otherwise use `[0, 1, 2]` for `USE_ABSLOTE_XYZ: true` or `[]` for false.
 Re-export ONNX/TIDL bundles after migration; only modify checkpoints from
 trusted sources, keeping backups.
 
-Training always uses the PyTorch voxelizer. The C++ voxelizer described below is used only in eval mode on CPU tensors.
+Static pillar training uses the PyTorch voxelizer; the static C++ voxelizer is
+used in eval mode on CPU tensors. StatPillars uses its C++ voxelizer for both
+training and inference.
 
 ### Static PFN architecture search
 
@@ -283,17 +318,39 @@ python -m gnd_seg_dnn.ros2_infer --run-dir lite_static_04_yaml --backend torch
 
 Use `--device cpu` or `--device cuda` for Torch; `auto` is the default.
 `--world-frame` sets the map frame and `--threshold` sets the occupancy
-threshold. `--voxelizer-threads` overrides the static CPU voxelizer count;
+threshold. `--voxelizer-threads` overrides the static or StatPillars CPU voxelizer count;
 `--amp` / `--no-amp` control Torch CUDA mixed precision. Pass ROS options
 after `--ros-args`. The Torch backend requires
 PyTorch. The ONNX backend loads no PyTorch modules.
 
 ## Alternative Models
 
-- **Heightmap:** set `model_variant: heightmap` in a YAML config to train on
-  a one-channel BEV input containing normalized per-cell maximum height.
+- **StatPillars:** set `model_variant: statpillars` in a YAML config to train on
+  32-channel BEV features projected from per-pillar relative XYZ statistics.
 
-  Export it with the same `export_onnx` command. Its `pillar_vfe.npz` stores heightmap geometry and clipping settings rather than learned point-encoder weights.
+  Export it with the same `export_onnx` command. Its `pillar_vfe.npz` stores
+  the pillar geometry and preprocessing parameters. The CPU statistics
+  encoder produces 15-channel calibration and runtime inputs; the projection
+  and BEV network are exported together and compiled for the C7x:
+
+  ```bash
+  python -m gnd_seg_dnn.export_onnx --run-dir statpillars_xyz_stats_04
+  python -m gnd_seg_dnn.tidl_compile --run-dir statpillars_xyz_stats_04 \
+    --calib-dir /path/to/calibration/clouds
+  python -m gnd_seg_dnn.evaluate --run-dir statpillars_xyz_stats_04 \
+    --backend tidl --split val
+  ```
+
+  Use the actual training run directory, and choose representative calibration
+  clouds. The C++ voxelizer extension must be built in both the compilation and
+  inference environments. `--skip-pfn`, `--pfn-on-cpu` and PFN deny-list
+  options do not apply to StatPillars. TIDL compilation and execution require
+  the TI toolchain and provider, and must be validated on the target device.
+
+  The former `model_variant: heightmap` name is accepted with a warning in
+  existing configurations. Older one-channel or 15-channel heightmap
+  checkpoints, and statistics-encoder checkpoints with the projection in the
+  encoder, are incompatible and must be retrained.
 
 - **Full model:** set `model_variant: full` in YAML to train the original, larger model. The full model is not accepted by the embedded ONNX exporter.
 

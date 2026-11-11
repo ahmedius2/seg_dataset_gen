@@ -6,7 +6,7 @@ Splits the network into
   * dense BEV net (pure convs): <out>/bev_net.onnx, compiled by TIDL for the C7x
 
 Usage:
-    python -m gnd_seg_dnn.export_onnx --ckpt dnn_runs_lite/best.pt --out export_lite
+    python -m gnd_seg_dnn.export_onnx --run-dir dnn_runs_lite
 """
 
 import argparse
@@ -35,8 +35,9 @@ class PFNExport(torch.nn.Module):
     Output: (1, C, max_pillars, 1).
     """
 
-    def __init__(self, vfe, max_points):
+    def __init__(self, vfe, max_points, single_pool=False):
         super().__init__()
+        self.single_pool = single_pool
         self.convs = torch.nn.ModuleList()
         self.last = []
         for layer in vfe.pfn_layers:
@@ -51,6 +52,12 @@ class PFNExport(torch.nn.Module):
             conv.bias.data = b
             self.convs.append(conv)
             self.last.append(layer.last_vfe)
+        self.max_points = max_points
+        if single_pool:
+            # One 1xP pool and one broadcast: only valid when MaxPool/Concat/Relu
+            # stay on the CPU (hybrid compile), TIDL rejects them.
+            self.steps = 0
+            return
         if max_points < 1 or max_points & (max_points - 1):
             raise ValueError("max_points_per_voxel must be a power of two for TIDL")
         self.steps = max_points.bit_length() - 1
@@ -59,13 +66,19 @@ class PFNExport(torch.nn.Module):
         self.pool = torch.nn.MaxPool2d((1, 2), stride=(1, 2))
 
     def _pool(self, x):
+        if self.single_pool:
+            return torch.amax(x, dim=3, keepdim=True)
         for _ in range(self.steps):
             x = self.pool(x)
         return x
 
     def _up(self, x):
+        if self.single_pool:
+            return x.expand(-1, -1, -1, self.max_points)
         for _ in range(self.steps):
-            x = torch.cat([x, x], dim=3)
+            # x is post-ReLU so relu(x) == x; it keeps the Concat inputs distinct
+            # (TIDL fails to topologically sort a node fed twice by one tensor).
+            x = torch.cat([x, torch.relu(x)], dim=3)
         return x
 
     def forward(self, x):
@@ -76,14 +89,14 @@ class PFNExport(torch.nn.Module):
         return x
 
 
-def _export_static(cfg, model, out, opset):
+def _export_static(cfg, model, out, opset, single_pool=False):
     """Static VFE: voxelize/decorate (C++), PFN (ONNX), scatter (NumPy)."""
     from .model.pillar_ops import scatter, decorate, voxelize
     import onnxruntime as ort
 
     vfe = model.vfe
     p = cfg.max_points_per_voxel
-    pfn = PFNExport(vfe, p).eval()
+    pfn = PFNExport(vfe, p, single_pool).eval()
     f = vfe.pfn_layers[0].linear.in_features
     dummy = torch.zeros(1, f, cfg.max_pillars, p)
     torch.onnx.export(pfn, dummy, str(out / "pfn.onnx"), opset_version=opset,
@@ -108,7 +121,7 @@ def _export_static(cfg, model, out, opset):
         cfg.voxelizer_threads)
     feats, n = decorate(
         vox, npts, coords, cfg.point_cloud_range, cfg.pillar_dims, cfg.max_pillars,
-        vfe.use_absolute_xyz, vfe.with_distance, cfg.voxelizer_threads)
+        vfe.abs_axes, vfe.rel_axes, vfe.with_distance, cfg.voxelizer_threads)
     out_pfn = ort.InferenceSession(str(out / "pfn.onnx"),
                                    providers=["CPUExecutionProvider"]).run(
         None, {"pillar_features_in": feats})[0]
@@ -121,33 +134,38 @@ def _export_static(cfg, model, out, opset):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--ckpt", required=True)
-    ap.add_argument("--out", default="export_lite")
+    ap.add_argument("--run-dir", required=True, help="training run directory")
+    ap.add_argument("--single-pool", action="store_true",
+                    help="PFN with one ReduceMax + Expand instead of log2(P) pools; only for "
+                         "hybrid compile (--pfn-deny-types MaxPool,Concat,Relu,ReduceMax,Expand)")
     ap.add_argument("--opset", type=int, default=13)
     ap.add_argument("--max-pillars", type=int, default=None,
                     help="fixed pillar count of the static-VFE PFN (default: from config)")
     args = ap.parse_args()
 
-    ckpt = torch.load(args.ckpt, map_location="cpu", weights_only=False)
-    cfg_dict = dict(ckpt["config"])
-    for k in ("grid_h", "grid_w", "grid_size"):
-        cfg_dict.pop(k, None)
-    cfg = Config(**cfg_dict)
-    cfg.__post_init__()
+    run_dir = Path(args.run_dir)
+    ckpt = torch.load(run_dir / "best.pt", map_location="cpu", weights_only=False)
+    cfg = Config.from_yaml(run_dir / "config.yaml")
+    cfg.assert_model_compatible(Config.from_dict(ckpt["config"]))
     assert cfg.model_variant in ("lite", "heightmap"), "checkpoint is not an embedded variant"
 
-    if args.max_pillars:
+    if args.max_pillars is not None:
+        if args.max_pillars < 1:
+            ap.error("--max-pillars must be positive")
         cfg.max_pillars = args.max_pillars
     model = build_model(cfg)
     model.load_state_dict(ckpt["model"], strict=True)
     model.eval()
 
-    out = Path(args.out)
+    out = run_dir / "onnx"
+    if out.exists() and (not out.is_dir() or any(out.iterdir())):
+        ap.error(f"export directory is not empty: {out}; move or remove it before exporting "
+                 "to avoid retaining stale ONNX or TIDL artifacts")
     out.mkdir(parents=True, exist_ok=True)
-    cfg.to_json(out / "config.json")
+    cfg.to_yaml(out / "config.yaml")
 
     if cfg.model_variant == "lite" and cfg.vfe_type == "static":
-        _export_static(cfg, model, out, args.opset)
+        _export_static(cfg, model, out, args.opset, args.single_pool)
         return
 
     if cfg.model_variant == "heightmap":
@@ -162,7 +180,10 @@ def main():
         np.savez(out / "pillar_vfe.npz", w1=w1, b1=b1, w2=w2, b2=b2,
                  range=np.array(cfg.point_cloud_range, np.float32),
                  voxel=np.array(cfg.pillar_dims, np.float32),
-                 grid=np.array([cfg.grid_w, cfg.grid_h], np.int32))
+                 grid=np.array([cfg.grid_w, cfg.grid_h], np.int32),
+                 abs_axes=np.array(model.vfe.abs_axes, dtype=bool),
+                 rel_axes=np.array(model.vfe.rel_axes, dtype=bool),
+                 with_distance=np.array(model.vfe.with_distance))
         c = cfg.scatter_config["NUM_BEV_FEATURES"]
     dummy = torch.zeros(1, c, cfg.grid_h, cfg.grid_w)
     torch.onnx.export(model.backbone, dummy, str(out / "bev_net.onnx"),

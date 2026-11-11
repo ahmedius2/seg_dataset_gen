@@ -1,8 +1,8 @@
 """Central configuration for the BEV occupancy training pipeline."""
 
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, fields
 from pathlib import Path
-import json
+import yaml
 
 
 class EasyDict(dict):
@@ -16,6 +16,16 @@ class EasyDict(dict):
 
     def __setattr__(self, name, value):
         self[name] = value
+
+
+def load_yaml_mapping(path):
+    path = Path(path)
+    if path.suffix.lower() not in (".yaml", ".yml"):
+        raise ValueError(f"Configuration must be a YAML file: {path}")
+    data = yaml.safe_load(path.read_text())
+    if not isinstance(data, dict):
+        raise ValueError(f"Configuration must be a mapping: {path}")
+    return data
 
 
 @dataclass
@@ -94,6 +104,8 @@ class Config:
     save_every: int = 5
     eval_threshold: float = 0.5
     val_visualizations: int = 4
+    save_visualizations: bool = True
+    point_stats: bool = True
     # Deprecated and unused: coverage reach is now fixed in meters via
     # bev_ops.coverage_kernel_size(cell_size). Kept so old checkpoints load.
     pred_coverage_kernel: int = 11
@@ -123,13 +135,14 @@ class Config:
     grid_size: list[int] = field(init=False, default_factory=lambda: [0, 0])
 
     vfe_config: dict = field(default_factory=lambda: EasyDict({
-        "WITH_DISTANCE": False,
-        "USE_ABSLOTE_XYZ": True,
+        "WITH_DISTANCE_FROM_PC_ORIG": False,
+        "ABS_POINT_COORDS": [0, 1, 2],
+        "REL_POINT_COORDS": [0, 1, 2],
         "USE_NORM": True,
-        "NUM_FILTERS": [ 64, 64 ]}))
+        "NUM_FILTERS": [ 16, 16 ]}))
 
     scatter_config: dict = field(default_factory=lambda: EasyDict({
-        "NUM_BEV_FEATURES": 64}))
+        "NUM_BEV_FEATURES": 16}))
 
     backbone_2d_config: dict = field(default_factory=lambda: EasyDict({
         "LAYER_NUMS": [3, 5, 5],
@@ -139,6 +152,34 @@ class Config:
         "NUM_UPSAMPLE_FILTERS": [128, 128, 128]}))
 
     def __post_init__(self):
+        self.vfe_config = EasyDict(self.vfe_config)
+        self.scatter_config = EasyDict(self.scatter_config)
+        self.backbone_2d_config = EasyDict(self.backbone_2d_config)
+        allowed_vfe = {"WITH_DISTANCE_FROM_PC_ORIG", "ABS_POINT_COORDS",
+                       "REL_POINT_COORDS", "USE_NORM", "NUM_FILTERS"}
+        unknown = self.vfe_config.keys() - allowed_vfe
+        if unknown:
+            raise ValueError(f"Unknown vfe_config fields: {sorted(unknown)}")
+        for name in ("WITH_DISTANCE_FROM_PC_ORIG", "USE_NORM"):
+            if not isinstance(self.vfe_config.get(name), bool):
+                raise ValueError(f"vfe_config.{name} must be a boolean")
+        for name in ("ABS_POINT_COORDS", "REL_POINT_COORDS"):
+            axes = self.vfe_config.get(name)
+            if (not isinstance(axes, list)
+                    or any(type(a) is not int or a not in (0, 1, 2) for a in axes)
+                    or len(set(axes)) != len(axes)):
+                raise ValueError(f"vfe_config.{name} must contain unique axis indices 0, 1, 2")
+        filters = self.vfe_config.get("NUM_FILTERS")
+        if (not isinstance(filters, list) or not filters
+                or any(type(n) is not int or n <= 0 for n in filters)
+                or any(n % 2 for n in filters[:-1])):
+            raise ValueError("vfe_config.NUM_FILTERS must contain positive widths; "
+                             "non-final widths must be even")
+        if type(self.max_points_per_voxel) is not int or self.max_points_per_voxel < 1:
+            raise ValueError("max_points_per_voxel must be a positive integer")
+        if (self.model_variant != "heightmap"
+                and self.scatter_config.get("NUM_BEV_FEATURES") != filters[-1]):
+            raise ValueError("scatter_config.NUM_BEV_FEATURES must match the final PFN width")
         self.grid_w = int(round((self.x_max - self.x_min) / self.cell_size))
         self.grid_h = int(round((self.y_max - self.y_min) / self.cell_size))
         if self.grid_w <= 0 or self.grid_h <= 0:
@@ -174,7 +215,8 @@ class Config:
     def lite(cls, **kw):
         cfg = cls(model_variant="lite", **kw)
         cfg.vfe_config = EasyDict({
-            "WITH_DISTANCE": False, "USE_ABSLOTE_XYZ": True,
+            "WITH_DISTANCE_FROM_PC_ORIG": False,
+            "ABS_POINT_COORDS": [0, 1, 2], "REL_POINT_COORDS": [0, 1, 2],
             "USE_NORM": True, "NUM_FILTERS": [32, 32]})
         cfg.scatter_config = EasyDict({"NUM_BEV_FEATURES": 32})
         return cfg
@@ -185,9 +227,48 @@ class Config:
         cfg.scatter_config = EasyDict({"NUM_BEV_FEATURES": 1})
         return cfg
 
-    def to_json(self, path):
-        Path(path).write_text(json.dumps(asdict(self), indent=2))
+    def to_yaml(self, path):
+        def plain(value):
+            if isinstance(value, dict):
+                return {k: plain(v) for k, v in value.items()}
+            if isinstance(value, (list, tuple)):
+                return [plain(v) for v in value]
+            return value
+
+        Path(path).write_text(yaml.safe_dump(plain(asdict(self)), sort_keys=False))
 
     @classmethod
-    def from_json(cls, path):
-        return cls(**json.loads(Path(path).read_text()))
+    def from_dict(cls, data):
+        if not isinstance(data, dict):
+            raise ValueError("Configuration must be a mapping")
+        init_names = {f.name for f in fields(cls) if f.init}
+        derived_names = {f.name for f in fields(cls) if not f.init}
+        unknown = data.keys() - init_names - derived_names
+        if unknown:
+            raise ValueError(f"Unknown configuration fields: {sorted(unknown)}")
+        return cls(**{k: v for k, v in data.items() if k in init_names})
+
+    @classmethod
+    def from_yaml(cls, path):
+        return cls.from_dict(load_yaml_mapping(path))
+
+    def assert_model_compatible(self, other):
+        """Reject architecture and input geometry changes when loading weights."""
+        from .model.pillar_ops import vfe_feature_opts
+
+        names = ("model_variant", "vfe_type", "cell_size", "x_min", "x_max",
+                 "y_min", "y_max", "z_min", "z_max", "col_axis", "row_axis",
+                 "flip_cols", "flip_rows", "max_points_per_voxel", "height_clip")
+        differences = [name for name in names if getattr(self, name) != getattr(other, name)]
+        if self.model_variant != "heightmap" and other.model_variant != "heightmap":
+            for name in ("scatter_config", "backbone_2d_config"):
+                if getattr(self, name) != getattr(other, name):
+                    differences.append(name)
+            for name in ("NUM_FILTERS", "USE_NORM"):
+                if self.vfe_config.get(name) != other.vfe_config.get(name):
+                    differences.append(f"vfe_config.{name}")
+            if vfe_feature_opts(self.vfe_config) != vfe_feature_opts(other.vfe_config):
+                differences.append("vfe_config.feature_options")
+        if differences:
+            raise ValueError("Configuration does not match checkpoint model/preprocessing: "
+                             + ", ".join(differences))

@@ -1,0 +1,74 @@
+# Lite static baseline. Paths are relative to the directory where commands run.
+data_root: /home/ubuntu/shared/dnn_dataset
+file_glob: "**/*.ply"
+val_fraction: 0.2
+test_fraction: 0.0
+split_seed: 1234
+split_by_scene: true
+intensity_lo: 190.0
+intensity_hi: 210.0
+ignore_unobserved: true
+
+x_min: -6.4
+x_max: 6.4
+y_min: -25.6
+y_max: 25.6
+z_min: -10.0
+z_max: 10.0
+cell_size: 0.4
+col_axis: 0
+row_axis: 1
+flip_rows: false
+flip_cols: false
+
+cache_in_memory: true
+aug_z_shift: true
+aug_z_shift_min: -1.0
+aug_z_shift_max: 1.0
+aug_z_invert: true
+aug_z_invert_prob: 0.5
+
+epochs: 100
+batch_size: 8
+lr: 0.002
+weight_decay: 0.0001
+grad_clip: 10.0
+warmup_epochs: 2
+scheduler: cosine
+amp: true
+num_workers: 4
+seed: 0
+loss_type: focal
+focal_alpha: 0.75
+focal_gamma: 2.0
+pos_weight: 1.0
+dice_weight: 0.0
+
+out_dir: lite_static_04_yaml
+log_every: 20
+save_every: 5
+eval_threshold: 0.5
+val_visualizations: 4
+save_visualizations: true
+point_stats: true
+early_stop_patience: 10
+early_stop_min_delta: 0.001
+
+vfe_type: static
+model_variant: lite
+max_points_per_voxel: 32
+voxelizer_threads: 4
+vfe_config:
+  WITH_DISTANCE_FROM_PC_ORIG: false
+  ABS_POINT_COORDS: [0, 1, 2]
+  REL_POINT_COORDS: [0, 1, 2]
+  USE_NORM: true
+  NUM_FILTERS: [32, 32]
+scatter_config:
+  NUM_BEV_FEATURES: 32
+backbone_2d_config:
+  LAYER_NUMS: [3, 5, 5]
+  LAYER_STRIDES: [2, 2, 2]
+  NUM_FILTERS: [64, 128, 256]
+  UPSAMPLE_STRIDES: [2, 4, 8]
+  NUM_UPSAMPLE_FILTERS: [128, 128, 128]

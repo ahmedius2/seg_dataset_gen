@@ -11,5 +11,5 @@ ext = Pybind11Extension(
     extra_link_args=["-pthread"],
 )
 
-setup(name="gnd_seg_dnn_voxelizer", ext_modules=[ext],
+setup(name="gnd_seg_dnn_voxelizer", ext_modules=[ext], install_requires=["PyYAML>=6.0"],
       cmdclass={"build_ext": build_ext}, packages=[])

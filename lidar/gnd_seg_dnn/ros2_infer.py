@@ -14,28 +14,23 @@ Key optimizations over the naive version:
     topic, on its own timer + callback group, under a MultiThreadedExecutor.
 """
 
-import os
 import sys
 import time
 import array
 import threading
-import json
 
 from pathlib import Path
-from types import SimpleNamespace
 
 import numpy as np
 
 # Make the training package importable before importing its submodules.  This
 # file is commonly launched directly rather than with `python -m`.
-DNN_ROOT = os.environ.get(
-    "DNN_ROOT",
-    "/home/ubuntu/shared/seg_dataset_gen/lidar",
-)
+DNN_ROOT = str(Path(__file__).resolve().parents[1])
 if DNN_ROOT not in sys.path:
     sys.path.insert(0, DNN_ROOT)
 
 import rclpy
+import rclpy.utilities
 from rclpy.node import Node
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
@@ -50,11 +45,8 @@ from nav_msgs.msg import OccupancyGrid
 from geometry_msgs.msg import Pose, Point, Quaternion
 from pc_transform_cpp.msg import AlignedCloudWithPose
 
-from gnd_seg_dnn.onnx_runtime import (
-    StaticPillarOnnxModel,
-    DynamicPillarOnnxModel,
-)
 from gnd_seg_dnn.bev_ops import coverage_kernel_size, dilate_bev_mask
+from gnd_seg_dnn.inference import load_run_model, parse_inference_args
 
 
 # ---------------------------------------------------------------------------
@@ -64,30 +56,21 @@ GLOBAL_MAP_SIZE_M      = 300.0
 # Global map resolution is not configurable: it always equals the model's
 # cell_size (pillar size), so each BEV cell maps to exactly one global cell.
 
-WORLD_FRAME = os.environ.get("SCENE_NAME", "scene_0000_0")
-
-SCORE_THRESHOLD = 0.5
-
 PUBLISH_PERIOD_S = 1.0        # 1 Hz for both maps
-
-MODEL_WEIGHTS = os.environ.get(
-    "DNN_WEIGHTS",
-    "/home/ubuntu/shared/seg_dataset_gen/lidar/dnn_runs_001/best.pt",
-)
-INFERENCE_BACKEND = os.environ.get("DNN_BACKEND", "torch").lower()
 
 
 class DNNInferenceNode(Node):
-    def __init__(self):
+    def __init__(self, options):
         super().__init__("dnn_inference_node")
 
         # ---- device + config + model ----
-        self.backend = INFERENCE_BACKEND
-        if self.backend == "onnx":
-            self.model = self._load_onnx_model()
-            self.device = "CPU (ONNX Runtime)"
+        self.backend = options.backend
+        self.world_frame = options.world_frame
+        self.score_threshold = options.threshold
+        self.model, self.cfg, self.device = load_run_model(options)
+        if self.backend != "torch":
             self.use_amp = False
-        elif self.backend == "torch":
+        else:
             import torch
 
             self.torch = torch
@@ -95,12 +78,10 @@ class DNNInferenceNode(Node):
                 torch.backends.cudnn.benchmark = True
                 torch.backends.cuda.matmul.allow_tf32 = True
                 torch.backends.cudnn.allow_tf32 = True
-            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            self.model = self._load_torch_model().to(self.device).eval()
-            self.use_amp = self.device.type == "cuda"
+            self.use_amp = (self.device.type == "cuda" if options.amp is None else options.amp)
+            if self.use_amp and self.device.type != "cuda":
+                raise ValueError("--amp requires a CUDA device")
             self.amp_dtype = torch.float16 if self.use_amp else torch.float32
-        else:
-            raise ValueError("DNN_BACKEND must be 'torch' or 'onnx'")
 
         self.grid_h = self.cfg.grid_h
         self.grid_w = self.cfg.grid_w
@@ -151,7 +132,7 @@ class DNNInferenceNode(Node):
         self._infer_count = 0
         self._last_infer_count = 0
 
-        self.log_exec_time = True
+        self.log_exec_time = not options.no_timings
         self._enc_ms = 0.0
         self._net_ms = 0.0
 
@@ -202,78 +183,13 @@ class DNNInferenceNode(Node):
         )
 
     # -----------------------------------------------------------------------
-    # Model loading (unchanged)
-    # -----------------------------------------------------------------------
-    def _load_torch_model(self):
-        import torch
-        from gnd_seg_dnn.config import Config
-        from gnd_seg_dnn.train import build_model
-
-        if not os.path.isfile(MODEL_WEIGHTS):
-            raise FileNotFoundError(
-                f"DNN weights not found at {MODEL_WEIGHTS}. "
-                f"Set the DNN_WEIGHTS env var to a checkpoint."
-            )
-
-        ckpt = torch.load(MODEL_WEIGHTS, map_location="cpu", weights_only=False)
-
-        if isinstance(ckpt, dict) and "model" in ckpt and "config" in ckpt:
-            cfg_dict = ckpt["config"]
-            for k in ("grid_h", "grid_w", "grid_size"):
-                cfg_dict.pop(k, None)
-            self.cfg = Config(**cfg_dict)
-            self.cfg.__post_init__()
-            state_dict = ckpt["model"]
-            self.get_logger().info(
-                f"Loaded checkpoint (epoch {ckpt.get('epoch')}, "
-                f"best val IoU {ckpt.get('best_iou', float('nan')):.4f})"
-            )
-        else:
-            state_dict = ckpt
-            self.get_logger().info("Loaded raw state_dict")
-
-        model = build_model(self.cfg)
-        model.load_state_dict(state_dict, strict=True)
-        return model
-
-    def _load_onnx_model(self):
-        model_path_value = os.environ.get("DNN_ONNX_MODEL")
-        if not model_path_value:
-            raise ValueError("Set DNN_ONNX_MODEL to the exported bev_net.onnx")
-        model_path = Path(model_path_value)
-        if not model_path.is_file():
-            raise FileNotFoundError(f"ONNX model not found: {model_path}")
-        export_dir = model_path.parent
-        config_path = Path(os.environ.get("DNN_CONFIG", export_dir / "config.json"))
-        with config_path.open() as stream:
-            config = json.load(stream)
-        static_vfe = config.get("vfe_type") == "static"
-        encoder_path = Path(os.environ.get("DNN_ENCODER", export_dir / "pillar_vfe.npz"))
-        pfn_path = Path(os.environ.get("DNN_PFN", export_dir / "pfn.onnx"))
-        required = (config_path, pfn_path) if static_vfe else (config_path, encoder_path)
-        for path in required:
-            if not path.is_file():
-                raise FileNotFoundError(f"ONNX runtime asset not found: {path}")
-        if config.get("model_variant") not in ("lite", "heightmap"):
-            raise ValueError("ONNX backend requires a lite or heightmap export")
-        self.cfg = SimpleNamespace(**config)
-        self.cfg.grid_w = int(round((self.cfg.x_max - self.cfg.x_min) / self.cfg.cell_size))
-        self.cfg.grid_h = int(round((self.cfg.y_max - self.cfg.y_min) / self.cfg.cell_size))
-        self.get_logger().info(f"Loading CPU ONNX model from {model_path}")
-        if static_vfe:
-            return StaticPillarOnnxModel(
-                export_dir, self.cfg, bev_path=model_path, pfn_path=pfn_path,
-                tidl_artifacts=os.environ.get("DNN_TIDL_ARTIFACTS"))
-        return DynamicPillarOnnxModel(model_path, encoder_path, self.cfg.model_variant)
-
-    # -----------------------------------------------------------------------
     # Inference — unchanged
     # -----------------------------------------------------------------------
     def _run_inference(self, xyz_aligned):
         if xyz_aligned.shape[0] == 0:
             return np.zeros((self.grid_h, self.grid_w), dtype=np.float32)
 
-        if self.backend == "onnx":
+        if self.backend != "torch":
             prob = self.model(xyz_aligned)
             self._enc_ms, self._net_ms = self.model.last_timings_ms
             dropped = getattr(self.model, "dropped_pillars", 0)
@@ -421,6 +337,10 @@ class DNNInferenceNode(Node):
 
         if self.log_exec_time:
             total_ms = (time.perf_counter() - t_start) * 1000.0
+            bd = getattr(self.model, "last_enc_breakdown_ms", None)
+            if bd:
+                self.get_logger().info(
+                    "[enc] " + "  ".join(f"{k} {v:.2f}" for k, v in bd.items()))
             self.get_logger().info(
                 f"[callback] unpack {unpack_ms:.2f}  infer {infer_ms:.2f} "
                 f"(pillar-enc {self._enc_ms:.2f} + net {self._net_ms:.2f})  "
@@ -432,8 +352,8 @@ class DNNInferenceNode(Node):
     # Fusion — local, O(touched cells)
     # -----------------------------------------------------------------------
     def _project_to_global(self, prob, coverage, origin_x, origin_y, yaw):
-        occ_mask  = coverage & (prob >= SCORE_THRESHOLD)
-        free_mask = coverage & (prob <  SCORE_THRESHOLD)
+        occ_mask  = coverage & (prob >= self.score_threshold)
+        free_mask = coverage & (prob < self.score_threshold)
 
         occ_idx  = self._global_indices(occ_mask,  origin_x, origin_y, yaw)
         free_idx = self._global_indices(free_mask, origin_x, origin_y, yaw)
@@ -509,7 +429,7 @@ class DNNInferenceNode(Node):
     def _publish_global_map(self):
         msg = OccupancyGrid()
         msg.header.stamp = self.get_clock().now().to_msg()
-        msg.header.frame_id = WORLD_FRAME
+        msg.header.frame_id = self.world_frame
         msg.info.resolution = self.global_res
         msg.info.width = self.global_w
         msg.info.height = self.global_h
@@ -549,7 +469,7 @@ class DNNInferenceNode(Node):
 
         msg = OccupancyGrid()
         msg.header.stamp = snap["stamp"]
-        msg.header.frame_id = WORLD_FRAME
+        msg.header.frame_id = self.world_frame
         msg.info.resolution = cfg.cell_size
         msg.info.width = self.grid_w
         msg.info.height = self.grid_h
@@ -570,15 +490,17 @@ class DNNInferenceNode(Node):
         coverage = snap["coverage"]
 
         data = np.full((self.grid_h, self.grid_w), -1, dtype=np.int8)
-        data[coverage & (prob >= SCORE_THRESHOLD)] = 100
-        data[coverage & (prob <  SCORE_THRESHOLD)] = 0
+        data[coverage & (prob >= self.score_threshold)] = 100
+        data[coverage & (prob < self.score_threshold)] = 0
         msg.data = array.array('b', data.tobytes())
         self.local_pub.publish(msg)
 
 
 def main(args=None):
-    rclpy.init(args=args)
-    node = DNNInferenceNode()
+    argv = sys.argv if args is None else args
+    options = parse_inference_args(rclpy.utilities.remove_ros_args(args=argv)[1:])
+    rclpy.init(args=argv)
+    node = DNNInferenceNode(options)
     executor = MultiThreadedExecutor(num_threads=3)
     executor.add_node(node)
     try:

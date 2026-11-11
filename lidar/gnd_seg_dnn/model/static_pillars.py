@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from .dynamic_pillars import VFETemplate
+from .pillar_ops import vfe_feature_opts
 
 try:  # optional C++ voxelizer, build with `python setup.py build_ext --inplace` in lidar dir
     from .. import _voxelizer
@@ -39,7 +40,11 @@ class PFNLayer(nn.Module):
         # else:
 
         x = self.linear(inputs)
-        x = self.norm(x.permute(0, 2, 1)).permute(0, 2, 1) if self.use_norm else x
+        if self.use_norm:
+            # Same per-channel statistics as BatchNorm1d on (V, C, P), but on a
+            # contiguous (V*P, C) view, which avoids a slow strided cuDNN kernel.
+            v, p, c = x.shape
+            x = self.norm(x.reshape(v * p, c)).view(v, p, c)
         x = F.relu(x)
         x_max = torch.max(x, dim=1, keepdim=True)[0]
 
@@ -57,9 +62,9 @@ class PillarVFE(VFETemplate):
         super().__init__(model_cfg=model_cfg)
 
         self.use_norm = self.model_cfg.USE_NORM
-        self.with_distance = self.model_cfg.WITH_DISTANCE
-        self.use_absolute_xyz = self.model_cfg.USE_ABSLOTE_XYZ
-        num_point_features += 6 if self.use_absolute_xyz else 3
+        self.abs_axes, self.rel_axes, self.with_distance = vfe_feature_opts(self.model_cfg)
+        # num_point_features (raw xyz) is superseded by the selected abs axes
+        num_point_features = sum(self.abs_axes) + 3 + sum(self.rel_axes)
         if self.with_distance:
             num_point_features += 1
 
@@ -186,9 +191,8 @@ class PillarVFE(VFETemplate):
         f_center[:, :, 0] = voxel_features[:, :, 0] - (coords[:, 3].to(voxel_features.dtype).unsqueeze(1) * self.voxel_x + self.x_offset)
         f_center[:, :, 1] = voxel_features[:, :, 1] - (coords[:, 2].to(voxel_features.dtype).unsqueeze(1) * self.voxel_y + self.y_offset)
         f_center[:, :, 2] = voxel_features[:, :, 2] - self.z_offset
-
-        features = [voxel_features, f_cluster, f_center] if self.use_absolute_xyz \
-            else [f_cluster, f_center]
+        features = [voxel_features[:, :, [a for a in range(3) if self.abs_axes[a]]],
+                    f_cluster, f_center[:, :, [a for a in range(3) if self.rel_axes[a]]]]
 
         if self.with_distance:
             points_dist = torch.norm(voxel_features[:, :, :3], 2, 2, keepdim=True)

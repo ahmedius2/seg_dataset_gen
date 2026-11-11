@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import shutil
 import time
 from pathlib import Path
 
@@ -138,7 +139,7 @@ def make_optimizer(model, cfg: Config):
     return torch.optim.AdamW(
         [{"params": decay, "weight_decay": cfg.weight_decay},
          {"params": no_decay, "weight_decay": 0.0}],
-        lr=cfg.lr, betas=(0.9, 0.99))
+        lr=cfg.lr, betas=(0.9, 0.99), fused=torch.cuda.is_available())
 
 
 def make_scheduler(optimizer, cfg: Config, steps_per_epoch: int):
@@ -379,41 +380,11 @@ def save_checkpoint(path, model, optimizer, scheduler, scaler, epoch,
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data", default=None, help="override data_root")
-    parser.add_argument("--out", default=None, help="override out_dir")
-    parser.add_argument("--epochs", type=int, default=None)
-    parser.add_argument("--batch-size", type=int, default=None)
-    parser.add_argument("--lr", type=float, default=None)
-    parser.add_argument("--loss", default=None,
-                        choices=["focal", "bce", "soft_iou"])
-    parser.add_argument("--config", default=None,
-                        help="JSON config to load instead of defaults")
+    parser.add_argument("--config", required=True, help="training YAML config")
     parser.add_argument("--resume", default=None, help="checkpoint to resume")
-    parser.add_argument("--lite", action="store_true",
-                        help="train the embedded (TIDL-friendly) model")
-    parser.add_argument("--heightmap", action="store_true",
-                        help="train the lite net on a 1-channel max-height map")
-    parser.add_argument("--cell-size", type=float, default=None,
-                        help="BEV cell / pillar size in meters (e.g. 0.2, 0.4, 0.8)")
-    parser.add_argument("--vfe", choices=["dynamic", "static"], default=None,
-                        help="pillar encoder: dynamic (all points) or static (capped per pillar)")
-    parser.add_argument("--max-points", type=int, default=None,
-                        help="points per pillar for the static VFE")
     args = parser.parse_args()
 
-    cfg = Config.from_json(args.config) if args.config else (
-        Config.lite() if args.lite else
-        Config.heightmap() if args.heightmap else Config())
-    if args.data: cfg.data_root = args.data
-    if args.out: cfg.out_dir = args.out
-    if args.epochs: cfg.epochs = args.epochs
-    if args.batch_size: cfg.batch_size = args.batch_size
-    if args.lr: cfg.lr = args.lr
-    if args.loss: cfg.loss_type = args.loss
-    if args.cell_size: cfg.cell_size = args.cell_size
-    if args.vfe: cfg.vfe_type = args.vfe
-    if args.max_points: cfg.max_points_per_voxel = args.max_points
-    cfg.__post_init__()
+    cfg = Config.from_yaml(args.config)
 
     set_seed(cfg.seed)
     out_dir = Path(cfg.out_dir)
@@ -424,7 +395,7 @@ def main():
             i += 1
         out_dir = out_dir.parent / f"{out_dir.name}_{i:03d}"
     out_dir.mkdir(parents=True, exist_ok=False)
-    cfg.to_json(out_dir / "config.json")
+    shutil.copyfile(args.config, out_dir / "config.yaml")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[device] {device}")
@@ -450,6 +421,7 @@ def main():
     best_epoch = None
     if args.resume:
         ckpt = torch.load(args.resume, map_location=device, weights_only=False)
+        cfg.assert_model_compatible(Config.from_dict(ckpt["config"]))
         model.load_state_dict(ckpt["model"])
         optimizer.load_state_dict(ckpt["optimizer"])
         if scheduler and ckpt.get("scheduler"):
@@ -474,7 +446,8 @@ def main():
         print(f"epoch {epoch} ({time.time() - t0:.1f}s)")
         print("  " + format_stats("train", tr))
         print("  " + format_stats("val  ", va))
-        if epoch == start_epoch and cfg.model_variant == "lite" and cfg.vfe_type == "static":
+        if (epoch == start_epoch and cfg.model_variant == "lite"
+                and cfg.vfe_type == "static" and cfg.point_stats):
             report_point_stats(val_loader, cfg, out_dir)
 
         history.append({"epoch": epoch, "train": tr, "val": va})
@@ -486,8 +459,9 @@ def main():
             save_checkpoint(out_dir / "best.pt", model, optimizer, scheduler,
                             scaler, epoch, best_iou, cfg)
             print(f"  new best val IoU {best_iou:.4f} at epoch {epoch} -> best.pt")
-            save_validation_visualizations(model, val_loader, device, cfg, epoch,
-                            out_dir)
+            if cfg.save_visualizations:
+                save_validation_visualizations(model, val_loader, device, cfg, epoch,
+                                out_dir)
 
         if va["iou"] > ref_iou + cfg.early_stop_min_delta:
             ref_iou = va["iou"]

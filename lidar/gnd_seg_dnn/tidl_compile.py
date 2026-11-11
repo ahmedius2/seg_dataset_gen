@@ -3,17 +3,15 @@
 Run on an x86 PC (not on the board) inside the edgeai-tidl-tools OSRT
 environment (onnxruntime with TIDLCompilationProvider, TIDL_TOOLS_PATH set):
 
-  python -m gnd_seg_dnn.tidl_compile --export-dir export_lite \
-      --calib-dir /path/to/clouds --out tidl_artifacts
+  python -m gnd_seg_dnn.tidl_compile --run-dir run \
+      --calib-dir /path/to/clouds
 
 Calibration clouds are the project's binary-little-endian .ply files, or
 .npy (N,3|4 float32, xyz first) / .bin (N,4 float32) files.
-Copy <out>/pfn and <out>/bev to the board and run ros2_infer with
-DNN_TIDL_ARTIFACTS=<dir containing pfn/ and bev/>.
+Compiled artifacts are stored in run/onnx/tidl_artifacts.
 """
 
 import argparse
-import json
 import os
 import multiprocessing as mp
 import tempfile
@@ -24,7 +22,8 @@ import numpy as np
 import onnx
 import onnxruntime as ort
 
-from .model.pillar_ops import decorate, scatter, voxelize
+from .model.pillar_ops import decorate, scatter, vfe_feature_opts, voxelize
+from .config import load_yaml_mapping
 from .ply_io import load_cloud as load_ply_cloud
 
 os.environ["TIDL_RT_PERFSTATS"] = "1"
@@ -43,8 +42,7 @@ def load_cloud(path):
 
 
 def load_cfg(export_dir):
-    with open(export_dir / "config.json") as f:
-        cfg = SimpleNamespace(**json.load(f))
+    cfg = SimpleNamespace(**load_yaml_mapping(export_dir / "config.yaml"))
     cfg.grid_w = int(round((cfg.x_max - cfg.x_min) / cfg.cell_size))
     cfg.grid_h = int(round((cfg.y_max - cfg.y_min) / cfg.cell_size))
     return cfg
@@ -64,14 +62,14 @@ def make_calibration(cfg, pfn_sess, clouds):
             int(cfg.max_points_per_voxel), threads)
         feats, n = decorate(
             vox, npts, coords, rng, vox_size, int(cfg.max_pillars),
-            bool(vfe["USE_ABSLOTE_XYZ"]), bool(vfe["WITH_DISTANCE"]), threads)
+            *vfe_feature_opts(vfe), threads)
         pillar = pfn_sess.run(None, {in_name: feats})[0]
         pfn_in.append(feats)
         bev_in.append(scatter(pillar, coords, n, cfg.grid_w, cfg.grid_h))
     return pfn_in, bev_in
 
 
-def compile_model(onnx_path, art_dir, inputs, args, bits=None):
+def compile_model(onnx_path, art_dir, inputs, args, bits=None, extra_opts=None):
     art_dir.mkdir(parents=True, exist_ok=True)
     # TIDL import needs every tensor shape in the graph; torch export omits them.
     inferred = Path(tempfile.mkdtemp()) / f"{onnx_path.stem}.onnx"
@@ -89,6 +87,7 @@ def compile_model(onnx_path, art_dir, inputs, args, bits=None):
         "advanced_options:calibration_frames": n,
         "advanced_options:calibration_iterations": min(args.calib_iters, n),  # <-- clamp
     }
+    opts.update(extra_opts or {})
     so = ort.SessionOptions()
     sess = ort.InferenceSession(
         str(onnx_path), sess_options=so,
@@ -116,15 +115,21 @@ def compile_isolated(*a):
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawTextHelpFormatter)
-    ap.add_argument("--export-dir", required=True,
-                    help="dir with pfn.onnx, bev_net.onnx, config.json")
+    ap.add_argument("--run-dir", required=True,
+                    help="training run directory containing onnx/")
     ap.add_argument("--calib-dir", required=True)
-    ap.add_argument("--out", default="tidl_artifacts")
     ap.add_argument("--num-frames", type=int, default=20)
     ap.add_argument("--bits", type=int, default=8, choices=(8, 16))
     ap.add_argument("--pfn-bits", type=int, default=16, choices=(8, 16),
                     help="PFN precision. Its output is post-ReLU (unsigned); at 8 bit the "
                          "TIDL import hangs in TIDL_runtimesPostProcessNet")
+    ap.add_argument("--skip-pfn", action="store_true",
+                    help="do not compile the PFN (run it with --pfn-on-cpu)")
+    ap.add_argument("--pfn-deny-types", default="",
+                    help="hybrid PFN: comma-separated ONNX op types kept on the CPU, e.g. "
+                         "MaxPool,Concat (the rest runs on the C7x as separate TIDL subgraphs)")
+    ap.add_argument("--pfn-deny-names", default="",
+                    help="hybrid PFN: comma-separated ONNX node names kept on the CPU")
     ap.add_argument("--calib-iters", type=int, default=10)
     ap.add_argument("--debug-level", type=int, default=0)
     ap.add_argument("--tidl-tools", default=os.environ.get("TIDL_TOOLS_PATH"))
@@ -132,7 +137,13 @@ def main():
     if not args.tidl_tools:
         ap.error("set --tidl-tools or TIDL_TOOLS_PATH (edgeai-tidl-tools/tidl_tools)")
 
-    export_dir, out = Path(args.export_dir), Path(args.out)
+    export_dir = Path(args.run_dir) / "onnx"
+    out = export_dir / "tidl_artifacts"
+    for name in (("bev",) if args.skip_pfn else ("pfn", "bev")):
+        target = out / name
+        if target.exists() and (not target.is_dir() or any(target.iterdir())):
+            ap.error(f"artifact directory already exists and is not empty: {target}; "
+                     "move or remove it before recompiling")
     clouds = sorted(p for p in Path(args.calib_dir).iterdir()
                     if p.suffix in (".ply", ".npy", ".bin"))[:args.num_frames]
     if not clouds:
@@ -143,7 +154,15 @@ def main():
     pfn_sess = ort.InferenceSession(str(pfn_path),
                                     providers=["CPUExecutionProvider"])
     pfn_in, bev_in = make_calibration(cfg, pfn_sess, clouds)
-    compile_isolated(pfn_path, out / "pfn", pfn_in, args, args.pfn_bits)
+    if not args.skip_pfn:
+        extra = {}
+        if args.pfn_deny_types:
+            extra["deny_list:layer_type"] = args.pfn_deny_types
+        if args.pfn_deny_names:
+            extra["deny_list:layer_name"] = args.pfn_deny_names
+        if extra:
+            extra["advanced_options:add_data_convert_ops"] = 0
+        compile_isolated(pfn_path, out / "pfn", pfn_in, args, args.pfn_bits, extra)
     compile_isolated(bev_path, out / "bev", bev_in, args)
 
 

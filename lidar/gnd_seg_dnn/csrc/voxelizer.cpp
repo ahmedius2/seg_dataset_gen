@@ -180,14 +180,15 @@ using IntArray64 = py::array_t<int32_t, py::array::c_style | py::array::forcecas
 
 // Builds the PFN input from voxelizer output, laid out channel-first and
 // padded to a fixed pillar count: (F, max_pillars, P), NCHW without the batch
-// dim. Channels: [x y z] (if use_abs_xyz), cluster offset (3), centre offset
-// (3), [distance] (if with_distance). Padded points/pillars are all zero, as
+// dim. Channels: selected absolute axes, cluster offset (3), selected
+// centre offsets, and optionally distance. Padded points/pillars are zero, as
 // in PillarVFE.forward. Returns (features, num_valid_pillars); pillars beyond
 // max_pillars are dropped.
 py::tuple decorate(FloatArray voxels, IntArray64 num_points, IntArray64 coords,
                    std::array<float, 3> range_min,
                    std::array<float, 3> voxel_size, int max_pillars,
-                   bool use_abs_xyz, bool with_distance, int num_threads) {
+                   std::array<bool, 3> abs_axes, std::array<bool, 3> rel_axes,
+                   bool with_distance, int num_threads) {
   if (voxels.ndim() != 3 || voxels.shape(2) != 3)
     throw std::invalid_argument("voxels must have shape (V, P, 3)");
   if (num_points.ndim() != 1 || num_points.shape(0) != voxels.shape(0))
@@ -200,7 +201,9 @@ py::tuple decorate(FloatArray voxels, IntArray64 num_points, IntArray64 coords,
   const int64_t v = voxels.shape(0);
   const int64_t P = voxels.shape(1);
   const int64_t n = std::min<int64_t>(v, max_pillars);
-  const int channels = (use_abs_xyz ? 3 : 0) + 6 + (with_distance ? 1 : 0);
+  const int n_abs = int(abs_axes[0]) + int(abs_axes[1]) + int(abs_axes[2]);
+  const int n_rel = int(rel_axes[0]) + int(rel_axes[1]) + int(rel_axes[2]);
+  const int channels = n_abs + 3 + n_rel + (with_distance ? 1 : 0);
 
   py::array_t<float> out(std::vector<py::ssize_t>{channels, max_pillars, P});
   float* o = out.mutable_data();
@@ -242,15 +245,15 @@ py::tuple decorate(FloatArray voxels, IntArray64 num_points, IntArray64 coords,
           const float x = pv[3 * s], y = pv[3 * s + 1], z = pv[3 * s + 2];
           float* dst = o + p * P + s;
           int c = 0;
-          if (use_abs_xyz) {
-            dst[(c++) * plane] = x; dst[(c++) * plane] = y; dst[(c++) * plane] = z;
-          }
+          if (abs_axes[0]) dst[(c++) * plane] = x;
+          if (abs_axes[1]) dst[(c++) * plane] = y;
+          if (abs_axes[2]) dst[(c++) * plane] = z;
           dst[(c++) * plane] = x - mx;
           dst[(c++) * plane] = y - my;
           dst[(c++) * plane] = z - mz;
-          dst[(c++) * plane] = x - cx;
-          dst[(c++) * plane] = y - cy;
-          dst[(c++) * plane] = z - z_off;
+          if (rel_axes[0]) dst[(c++) * plane] = x - cx;
+          if (rel_axes[1]) dst[(c++) * plane] = y - cy;
+          if (rel_axes[2]) dst[(c++) * plane] = z - z_off;
           if (with_distance) dst[c * plane] = std::sqrt(x * x + y * y + z * z);
         }
       }
@@ -270,7 +273,10 @@ PYBIND11_MODULE(_voxelizer, m) {
         "num_points (V,) int32, coords (V,4) int32 = (batch, 0, row, col))");
   m.def("decorate", &decorate, py::arg("voxels"), py::arg("num_points"),
         py::arg("coords"), py::arg("range_min"), py::arg("voxel_size"),
-        py::arg("max_pillars"), py::arg("use_abs_xyz") = true,
-        py::arg("with_distance") = false, py::arg("num_threads") = 4,
+        py::arg("max_pillars"),
+        py::arg("abs_axes") = std::array<bool, 3>{true, true, true},
+        py::arg("rel_axes") = std::array<bool, 3>{true, true, true},
+        py::arg("with_distance") = false,
+        py::arg("num_threads") = 4,
         "-> (features (F, max_pillars, P) float32, num_valid_pillars)");
 }

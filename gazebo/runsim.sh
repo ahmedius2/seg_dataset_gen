@@ -136,12 +136,9 @@ if [[ $EXEC_MODE != "test_remote" ]]; then
 
     if [[ $EXEC_MODE != "dataset_gen" ]]; then
         PT="$CUR_PWD/../lidar"
-        # Pytorch run
-        #export DNN_BACKEND=torch DNN_WEIGHTS=$PT/lite_static_08_128p/best.pt
-        # Or, CPU run
-        ONNX_PT=$(realpath "${PT}/lite_static_04_32p/export/bev_net.onnx")
-        export DNN_BACKEND=onnx DNN_ONNX_MODEL=$ONNX_PT
-        run_job "$RUN_DIR/ros2_dnn_infer.log" python ${PT}/gnd_seg_dnn/ros2_infer.py
+        MODEL_RUN_DIR="${PT}/single_z16"
+        run_job "$RUN_DIR/ros2_dnn_infer.log" python "${PT}/gnd_seg_dnn/ros2_infer.py" \
+            --run-dir "${MODEL_RUN_DIR}" --backend onnx --world-frame "${SCENE_NAME}"
     fi
 fi
 

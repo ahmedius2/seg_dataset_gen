@@ -35,14 +35,22 @@ def voxelize(points, point_cloud_range, voxel_size, grid_size,
         [int(grid_size[0]), int(grid_size[1])], int(max_points), int(num_threads))
 
 
+def vfe_feature_opts(vfe):
+    """Return axis masks and origin-distance flag in canonical xyz order."""
+    return (tuple(a in vfe["ABS_POINT_COORDS"] for a in range(3)),
+            tuple(a in vfe["REL_POINT_COORDS"] for a in range(3)),
+            vfe["WITH_DISTANCE_FROM_PC_ORIG"])
+
+
 def decorate(voxels, num_points, coords, point_cloud_range, voxel_size,
-             max_pillars, use_abs_xyz=True, with_distance=False, num_threads=4):
+             max_pillars, abs_axes=(True, True, True), rel_axes=(True, True, True),
+             with_distance=False, num_threads=4):
     """-> (features (1, F, max_pillars, P) float32, num_valid_pillars)."""
     _require_extension()
     feats, n = _voxelizer.decorate(
         voxels, num_points, coords, list(point_cloud_range[:3]),
-        list(voxel_size[:3]), int(max_pillars), bool(use_abs_xyz),
-        bool(with_distance), int(num_threads))
+        list(voxel_size[:3]), int(max_pillars), [bool(a) for a in abs_axes],
+        [bool(a) for a in rel_axes], bool(with_distance), int(num_threads))
     return feats[None], n
 
 

@@ -6,10 +6,10 @@
 #   source ./setup_env.sh
 #
 # Then use one command at a time:
-#   ./lidar/testall.sh train
-#   RUN_DIR=./dnn_runs_static ./lidar/testall.sh eval
-#   RUN_DIR=./dnn_runs_static ./lidar/testall.sh export
-#   ONNX_MODEL=./exports/static/bev_net.onnx ./lidar/testall.sh ros2
+#   ./testall.sh train configs/lite_static_04.yaml
+#   ./testall.sh eval lite_static_04_yaml
+#   ./testall.sh export lite_static_04_yaml
+#   ./testall.sh ros2 lite_static_04_yaml onnx
 
 set -euo pipefail
 
@@ -22,25 +22,18 @@ if [[ -z "${PYTHONPATH:-}" || ":${PYTHONPATH}:" != *:"${SCRIPT_DIR}":* ]]; then
 fi
 
 PYTHON="${PYTHON:-python}"
-DATA_ROOT="${DATA_ROOT:-/home/ubuntu/shared/dnn_dataset}"
-RUN_DIR="${RUN_DIR:-${SCRIPT_DIR}/dnn_runs_static}"
-EXPORT_DIR="${EXPORT_DIR:-${SCRIPT_DIR}/exports/static}"
-CKPT="${CKPT:-${RUN_DIR}/best.pt}"
-ONNX_MODEL="${ONNX_MODEL:-${EXPORT_DIR}/bev_net.onnx}"
-MAX_PILLARS="${MAX_PILLARS:-4096}"
 
 usage() {
     cat <<EOF
-Usage: $0 {train|eval|export|ros2}
+Usage: $0 train CONFIG.yaml
+       $0 {eval|export} RUN_DIR
+       $0 ros2 RUN_DIR [torch|onnx|tidl]
 
 Commands:
-  train   Train a static lite model using DATA_ROOT and RUN_DIR.
-  eval    Evaluate CKPT on the validation split.
-  export  Export CKPT to EXPORT_DIR, including the static PFN.
-  ros2    Run ROS 2 inference using ONNX_MODEL.
-
-Override paths with:
-  DATA_ROOT, RUN_DIR, EXPORT_DIR, CKPT, ONNX_MODEL, MAX_PILLARS
+  train   Train using the YAML configuration.
+  eval    Evaluate the best checkpoint in RUN_DIR.
+  export  Export the best checkpoint to RUN_DIR/onnx.
+  ros2    Run inference with the selected backend (default: torch).
 EOF
 }
 
@@ -53,33 +46,24 @@ require_file() {
 
 case "${1:-}" in
     train)
+        require_file "${2:?Training YAML required}"
         exec "${PYTHON}" -m gnd_seg_dnn.train \
-            --lite \
-            --vfe static \
-            --cell-size 0.4 \
-            --data "${DATA_ROOT}" \
-            --out "${RUN_DIR}"
+            --config "$2"
         ;;
     eval)
-        require_file "${CKPT}"
+        require_file "${2:?Run directory required}/best.pt"
         exec "${PYTHON}" -m gnd_seg_dnn.evaluate \
-            --ckpt "${CKPT}" \
-            --data "${DATA_ROOT}" \
-            --out "${RUN_DIR}/evaluation.json"
+            --run-dir "$2" \
+            --out "$2/evaluation.json"
         ;;
     export)
-        require_file "${CKPT}"
-        mkdir -p "${EXPORT_DIR}"
+        require_file "${2:?Run directory required}/best.pt"
         exec "${PYTHON}" -m gnd_seg_dnn.export_onnx \
-            --ckpt "${CKPT}" \
-            --out "${EXPORT_DIR}" \
-            --max-pillars "${MAX_PILLARS}"
+            --run-dir "$2"
         ;;
     ros2)
-        require_file "${ONNX_MODEL}"
-        export DNN_BACKEND=onnx
-        export DNN_ONNX_MODEL="${ONNX_MODEL}"
-        exec "${PYTHON}" -m gnd_seg_dnn.ros2_infer
+        exec "${PYTHON}" -m gnd_seg_dnn.ros2_infer \
+            --run-dir "${2:?Run directory required}" --backend "${3:-torch}"
         ;;
     *)
         usage

@@ -32,57 +32,153 @@ This repository generates simulated LiDAR data and trains a BEV occupancy model.
    cd ..
    ```
 
-   This produces the simulation recordings and LiDAR dataset used for training the DNN. The default training data root is `/home/ubuntu/shared/dnn_dataset`; override it with `--data` if the generated PLY files are elsewhere.
+   This produces the simulation recordings and LiDAR dataset used for training the DNN. Set `data_root` in the training YAML to the directory containing the generated PLY files.
 
 ## Train the Lite Model
 
-Run training from the `lidar` directory:
+Configuration files are in [`lidar/configs/`](./lidar/configs/). Install
+PyYAML in the Python environments used for training, export, TIDL compilation
+and ONNX/ROS inference:
+
+```bash
+python -m pip install 'PyYAML>=6.0'
+```
+
+Edit `data_root` and `out_dir` in the YAML, then run training from the
+`lidar` directory:
 
 ```bash
 cd lidar
-python -m gnd_seg_dnn.train --lite --out dnn_runs_lite
+python -m gnd_seg_dnn.train --config configs/lite_static_04.yaml
 ```
 
-The command uses the lite model explicitly. Defaults include 100 epochs, batch size 8, a 2-epoch learning-rate warmup followed by cosine decay, and early stopping after 10 epochs without a validation IoU improvement greater than `0.001`.
+Edit or copy the YAML files to configure a model. The supplied
+[`lite_static_04.yaml`](./lidar/configs/lite_static_04.yaml) describes the
+0.4 m static baseline; [`single_z16.yaml`](./lidar/configs/single_z16.yaml)
+describes the single-layer search candidate. Paths in YAML are resolved
+relative to the working directory. Unspecified fields use the defaults in
+`Config`; derived geometry is recomputed from the extents and `cell_size`.
+Training settings are read from YAML. Defaults in the supplied files include
+100 epochs, batch size 8, a 2-epoch warmup followed by cosine decay,
+and early stopping after 10 epochs without an IoU improvement above `0.001`.
+Set `save_visualizations: false` or `point_stats: false` to skip those
+outputs. To resume, add `--resume /path/to/checkpoint.pt`.
 
-Useful overrides:
+Evaluate with the saved run configuration and checkpoint:
 
 ```bash
-python -m gnd_seg_dnn.train --lite \
-  --data /path/to/dnn_dataset \
-  --out dnn_runs_lite \
-  --epochs 100 \
-  --batch-size 8 \
-  --lr 0.002
+python -m gnd_seg_dnn.evaluate --run-dir lite_static_04_yaml --split val
 ```
+
+Evaluation reads `config.yaml` and `best.pt` from the run directory and checks
+that model and input geometry match. Evaluation options such as `--data`,
+`--threshold`, `--split`, `--workers`, and `--batch-size` can be overridden
+on the command line. After export, add `--backend onnx` to evaluate the ONNX
+pipeline or `--backend tidl` to evaluate compiled TIDL artifacts; use
+`--pfn-on-cpu` for a TIDL build without the PFN.
 
 ### Cell size and pillar encoder
 
 The BEV cell size is also the pillar size, the local-map resolution and the global-map resolution; they cannot differ. Valid sizes divide the 12.8 m x 51.2 m grid into whole cells and give a grid whose sides are divisible by 8 (for example 0.1, 0.2, 0.4, 0.8 or 1.6 m); other values are rejected with an error.
 
-```bash
-python -m gnd_seg_dnn.train --lite --cell-size 0.4 --out dnn_runs_lite_04
-```
+Set `cell_size: 0.4` in the YAML for 0.4 m pillars.
 
 Coverage dilation (which cells count as observed) and the hole fill used to build training labels have a fixed reach of about 1.6 m, so their kernel in cells scales automatically with the cell size (7 cells at 0.2 m, 3 at 0.4 m, none at 0.8 m). Retrain when changing the cell size or this behaviour.
 
 Two pillar encoders are available:
 
-- `--vfe dynamic` (default): uses every point in a pillar.
-- `--vfe static`: keeps at most `--max-points` points per pillar, dropping later ones. This is the variant whose pillar network can be compiled by TIDL; see below.
+- `vfe_type: dynamic`: uses every point in a pillar.
+- `vfe_type: static`: keeps at most `max_points_per_voxel` points per pillar, dropping later ones. This is the variant whose pillar network can be compiled by TIDL; see below.
 
 ```bash
-python -m gnd_seg_dnn.train --lite --vfe static --cell-size 0.4 --out dnn_runs_static
+python -m gnd_seg_dnn.train --config configs/lite_static_04.yaml
 ```
 
+A lighter point encoder uses fewer input features and narrower layers. In
+`vfe_config`, `ABS_POINT_COORDS: [2]` feeds only absolute z and
+`REL_POINT_COORDS: [0, 1]` selects x/y offsets from the pillar's geometric
+center. Both lists use indices 0=x, 1=y, 2=z (empty lists are allowed);
+features are emitted in x/y/z order regardless of list order. All three
+offsets from the mean of retained points remain included. Set
+`WITH_DISTANCE_FROM_PC_ORIG: true` to add distance from the coordinate origin.
+`NUM_FILTERS` sets the PFN widths; `scatter_config.NUM_BEV_FEATURES` must equal
+the final width. The coordinate options apply to static and dynamic VFEs.
+Changing features needs retraining, and the C++ voxelizer must be rebuilt
+(`python setup.py build_ext --inplace`) on every machine running the static
+inference pipeline:
+
+```bash
+python -m gnd_seg_dnn.train --config configs/single_z16.yaml
+```
+
+The old names `WITH_DISTANCE_TO_PC_ORIG`, `USE_ABSLOTE_XYZ`, `ABS_AXES`
+and `USE_CENTER_Z` are no longer accepted, including in embedded checkpoint
+configs. Existing YAMLs and checkpoint configurations must be manually
+migrated before use: rename the distance field, replace the absolute settings
+with `ABS_POINT_COORDS`, and replace `USE_CENTER_Z` with `[0, 1, 2]` when
+true or `[0, 1]` when false. If `ABS_AXES` was present, use its value;
+otherwise use `[0, 1, 2]` for `USE_ABSLOTE_XYZ: true` or `[]` for false.
+Re-export ONNX/TIDL bundles after migration; only modify checkpoints from
+trusted sources, keeping backups.
+
 Training always uses the PyTorch voxelizer. The C++ voxelizer described below is used only in eval mode on CPU tensors.
+
+### Static PFN architecture search
+
+The search compares the saved `lite_static_04/best.pt` checkpoint and a
+freshly trained baseline against a small, explicit set of cheaper static PFNs.
+It varies the point cap (32, 16, or 8), PFN depth/width and input features,
+while keeping the pillar size at **0.4 m**, the final PFN width at 32 and the
+BEV network unchanged. Every architecture is trained from scratch with the
+same settings, scene split and seeds as the retrained baseline.
+
+From `lidar/`, using the same Python environment as training:
+
+```bash
+# Inspect candidates and projection MACs without training.
+python -m gnd_seg_dnn.search_pfn --out pfn_search --dry-run
+
+# Full search: by default nine candidates plus a retrained baseline, each
+# using the checkpoint's epoch budget and early-stopping settings.
+python -m gnd_seg_dnn.search_pfn --baseline lite_static_04/best.pt \
+    --data /path/to/dnn_dataset --out pfn_search
+```
+
+`--out` must be a new directory; existing results are never overwritten.
+To limit a preliminary run, use for example
+`--epochs 10 --candidates narrow16 single16 z16 --workers 4`. Short runs are
+only screening runs: repeat promising candidates in a **new** output directory
+using the full baseline budget and, preferably, several seeds, e.g.
+`--candidates narrow16 single16 z16 --seeds 0 1 2`. Each seed also retrains
+the baseline. `--batch-size` can override the batch size for all trials.
+For a fair comparison, use the same dataset contents and split as the original
+run; `splits.json` records the file paths used, but does not detect changed
+file contents. The saved checkpoint is re-evaluated on that validation split.
+
+The search writes each trial's config, history and `best.pt`, plus
+`baseline_evaluation.json` and `results.json`. Candidates are ranked by mean
+best validation IoU over the requested seeds. A `winner` is reported only if
+its mean beats both the retrained baseline mean and the re-evaluated saved
+checkpoint; there may be no winner. These are validation-set comparisons, not a
+guarantee of improvement on new scenes. Confirm finalists on a separate,
+previously untouched test set and consider repeated seeds before deployment.
+The best checkpoint for each individual seed is in its trial directory.
+
+The compute figure is the sum of PFN linear/1x1 convolution multiply-accumulates
+for one fully padded exported frame (`grid_h * grid_w` pillars), not total
+model compute or measured latency. It excludes voxelization, feature
+decoration, normalization, pooling, scatter and the BEV network. Reducing the
+point cap also drops points and may change accuracy. Verify actual latency and
+TIDL compatibility on the target hardware after exporting the chosen trial
+with the normal static export procedure below.
 
 If the output directory already exists, training chooses a numbered sibling such as `dnn_runs_lite_001`. Each run contains:
 
 - `best.pt` and `last.pt` checkpoints. The log reports the epoch and validation IoU whenever a new best checkpoint is saved.
 - `history.json` with per-epoch train and validation metrics.
 - `splits.txt` listing the training and validation scenes and frame counts.
-- `config.json`, periodic epoch checkpoints, and validation visualizations for best-IoU epochs.
+- `config.yaml`, an exact copy of the input YAML, periodic epoch checkpoints,
+  and validation visualizations for best-IoU epochs.
 
 The scene split is grouped by scene, so frames from one scene are not divided between training and validation. The split seed and scene lists are recorded with the run.
 
@@ -91,16 +187,14 @@ The scene split is grouped by scene, so frames from one scene are not divided be
 Export the best checkpoint from the run directory. Use the actual numbered output directory if training selected one:
 
 ```bash
-python -m gnd_seg_dnn.export_onnx \
-  --ckpt dnn_runs_lite/best.pt \
-  --out exports/lite
+python -m gnd_seg_dnn.export_onnx --run-dir lite_static_04_yaml
 ```
 
-The export directory contains:
+The export directory `lite_static_04_yaml/onnx/` contains:
 
 - `bev_net.onnx`: the dense BEV network.
 - `pillar_vfe.npz`: the lite point encoder's folded weights and geometry.
-- `config.json`: model variant and BEV geometry for inference.
+- `config.yaml`: model variant and BEV geometry for inference.
 
 The ONNX file contains the dense network only. The point encoder runs in NumPy before ONNX Runtime. Exporting requires the training environment with PyTorch and ONNX installed; the inference process does not need PyTorch.
 
@@ -117,7 +211,7 @@ The setup uses the active `python` executable and requires `pybind11` plus a C++
 
 ## Export a Static-Pillar Model (C++ voxelizer + PFN ONNX + BEV ONNX)
 
-A checkpoint trained with `--vfe static` exports as a deployable pipeline:
+A checkpoint trained with `vfe_type: static` exports as a deployable pipeline:
 
 ```
 points -> voxelize (C++) -> decorate (C++) -> PFN (ONNX) -> scatter (NumPy) -> BEV net (ONNX)
@@ -134,27 +228,34 @@ points -> voxelize (C++) -> decorate (C++) -> PFN (ONNX) -> scatter (NumPy) -> B
 2. Export, choosing a fixed maximum pillar count for the PFN (TIDL needs static shapes):
 
    ```bash
-   python -m gnd_seg_dnn.export_onnx \
-     --ckpt dnn_runs_static/best.pt \
-     --out exports/static \
+   python -m gnd_seg_dnn.export_onnx --run-dir lite_static_04_yaml \
      --max-pillars 4096
    ```
 
-   The export directory contains `pfn.onnx` (input `1 x F x max_pillars x max_points`, using only Conv, Relu, MaxPool, Resize and Concat), `bev_net.onnx` and `config.json`. The script ends with a check of the whole pipeline against the PyTorch model and prints the pillar count used and the maximum logit difference.
+   The export directory contains `pfn.onnx` (input `1 x F x max_pillars x max_points`, using only Conv, Relu, MaxPool, Resize and Concat), `bev_net.onnx` and `config.yaml`. The script ends with a check of the whole pipeline against the PyTorch model and prints the pillar count used and the maximum logit difference.
 
-3. Choose `--max-pillars` from real data at your cell size. The graph always processes the full padded size, so too large wastes compute; too small drops real pillars (the node logs a warning and the check shows a larger logit difference). `config.json` records the value.
+3. Choose `--max-pillars` from real data at your cell size. The graph always processes the full padded size, so too large wastes compute; too small drops real pillars (the node logs a warning and the check shows a larger logit difference). `config.yaml` records the value.
 
-Run the node exactly as for the lite export; it detects `"vfe_type": "static"` in `config.json` and loads `pfn.onnx` from the same directory (override with `DNN_PFN`):
+Run the node using the run directory:
 
 ```bash
-DNN_BACKEND=onnx \
-DNN_ONNX_MODEL=/path/to/exports/static/bev_net.onnx \
-python -m gnd_seg_dnn.ros2_infer
+python -m gnd_seg_dnn.ros2_infer --run-dir lite_static_04_yaml --backend onnx
 ```
 
-The voxelizer and decoration use 4 threads by default (`voxelizer_threads` in `config.py`). TIDL compilation of `pfn.onnx` and `bev_net.onnx` is done with your own TI toolchain; the node itself runs both models with ONNX Runtime's CPU provider.
+The voxelizer and decoration use `voxelizer_threads` from the YAML. Compile
+TIDL models using the TI toolchain:
 
-The node logs pillar encoding and network timings separately by default; set `self.log_exec_time = False` in `ros2_infer.py` to disable the extra timing output. The callback log reports `pillar-enc` and `net` times.
+```bash
+python -m gnd_seg_dnn.tidl_compile --run-dir lite_static_04_yaml \
+  --calib-dir /path/to/calibration/clouds
+python -m gnd_seg_dnn.ros2_infer --run-dir lite_static_04_yaml --backend tidl
+```
+
+Artifacts are stored in `onnx/tidl_artifacts/`. For a PFN compiled with
+`--skip-pfn`, add `--pfn-on-cpu` to the TIDL inference command. TIDL requires
+the provider and corresponding artifacts; it does not silently select the
+CPU backend if the provider is unavailable. Use `--no-timings` to disable
+timing logs.
 
 ## Run ROS 2 Inference Without PyTorch
 
@@ -162,34 +263,39 @@ Install NumPy and ONNX Runtime in the inference environment, and source the ROS 
 
 ```bash
 cd lidar
-DNN_BACKEND=onnx \
-DNN_ONNX_MODEL=/path/to/exports/lite/bev_net.onnx \
-python -m gnd_seg_dnn.ros2_infer
+python -m gnd_seg_dnn.ros2_infer --run-dir lite_static_04_yaml --backend onnx
 ```
 
-By default, the node reads `config.json` and `pillar_vfe.npz` from the ONNX model's directory. Set `DNN_CONFIG` or `DNN_ENCODER` to override either path. This backend uses ONNX Runtime's `CPUExecutionProvider`; it runs on the CPU and does not currently offload to GPU.
+The run directory holds `config.yaml`, `best.pt`, and the `onnx/` directory.
+The latter contains export-specific `config.yaml` (including the fixed pillar
+count), the ONNX files, and optionally `tidl_artifacts/`. ONNX CPU inference
+uses `CPUExecutionProvider`; select `--backend tidl` for TIDL. Old bundles
+must be re-exported into `onnx/`, then recompiled for TIDL if needed.
+Export refuses to overwrite a nonempty `onnx/` directory, and compilation
+refuses to overwrite nonempty artifact directories; move or remove the old
+outputs deliberately before regenerating them.
 
 The node retains a PyTorch backend for desktop use:
 
 ```bash
-DNN_BACKEND=torch \
-DNN_WEIGHTS=/path/to/dnn_runs_lite/best.pt \
-python -m gnd_seg_dnn.ros2_infer
+python -m gnd_seg_dnn.ros2_infer --run-dir lite_static_04_yaml --backend torch
 ```
 
-The Torch backend requires PyTorch. The ONNX backend loads no PyTorch modules.
+Use `--device cpu` or `--device cuda` for Torch; `auto` is the default.
+`--world-frame` sets the map frame and `--threshold` sets the occupancy
+threshold. `--voxelizer-threads` overrides the static CPU voxelizer count;
+`--amp` / `--no-amp` control Torch CUDA mixed precision. Pass ROS options
+after `--ros-args`. The Torch backend requires
+PyTorch. The ONNX backend loads no PyTorch modules.
 
 ## Alternative Models
 
-- **Heightmap:** train a one-channel BEV input containing normalized per-cell maximum height:
-
-  ```bash
-  python -m gnd_seg_dnn.train --heightmap --out dnn_runs_heightmap
-  ```
+- **Heightmap:** set `model_variant: heightmap` in a YAML config to train on
+  a one-channel BEV input containing normalized per-cell maximum height.
 
   Export it with the same `export_onnx` command. Its `pillar_vfe.npz` stores heightmap geometry and clipping settings rather than learned point-encoder weights.
 
-- **Full model:** omit `--lite` and `--heightmap` to train the original, larger model. The full model is not accepted by the embedded ONNX exporter.
+- **Full model:** set `model_variant: full` in YAML to train the original, larger model. The full model is not accepted by the embedded ONNX exporter.
 
 Compare validation IoU and board-side latency before choosing a deployment model. Parameter count alone does not establish the achieved inference rate; profile both point preprocessing and ONNX inference with representative point clouds on the target hardware.
 
@@ -200,10 +306,11 @@ After sourcing [lidar/setup_env.sh](./lidar/setup_env.sh), [lidar/testall.sh](./
 ```bash
 cd lidar
 source ./setup_env.sh
-./testall.sh train
-RUN_DIR=./dnn_runs_static ./testall.sh eval
-RUN_DIR=./dnn_runs_static ./testall.sh export
-ONNX_MODEL=./exports/static/bev_net.onnx ./testall.sh ros2
+./testall.sh train configs/lite_static_04.yaml
+./testall.sh eval lite_static_04_yaml
+./testall.sh export lite_static_04_yaml
+./testall.sh ros2 lite_static_04_yaml onnx
 ```
 
-Set `DATA_ROOT`, `RUN_DIR`, `EXPORT_DIR`, `CKPT`, and `ONNX_MODEL` to match the local dataset and generated artifacts. The commands intentionally run one stage at a time so that a numbered training output directory can be selected explicitly for later stages.
+The commands run one stage at a time so that a numbered training output
+directory can be selected explicitly for later stages.

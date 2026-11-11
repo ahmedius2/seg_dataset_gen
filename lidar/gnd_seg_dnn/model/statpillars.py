@@ -20,15 +20,19 @@ class StatPillarsEncoder(nn.Module):
         self.num_threads = num_threads
 
     def forward(self, points, batch_size=None):
+        stats, _ = self.encode_with_counts(points, batch_size)
+        return stats
+
+    def encode_with_counts(self, points, batch_size=None):
         # points: [M, 4] = (batch_idx, x, y, z)
         if points.device.type != "cpu":
             raise ValueError("StatPillars requires point tensors on CPU")
         if batch_size is None:
             batch_size = int(points[:, 0].max().item()) + 1 if points.shape[0] else 1
-        stats, _ = pillar_statistics(
+        stats, counts = pillar_statistics(
             points.detach().float().numpy(), self.point_cloud_range, self.voxel_size,
             [self.w, self.h], self.max_points_per_voxel, self.num_threads, batch_size)
-        return torch.from_numpy(stats)
+        return torch.from_numpy(stats), counts
 
 
 class StatPillarsModel(nn.Module):

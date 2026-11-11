@@ -23,7 +23,7 @@ if [[ "${EXEC_MODE}" == "dataset_gen" && -d "${RUN_DIR}/bag_recording" ]]; then
 fi
 
 # Set LiDAR frequency
-LIDAR_HZ="2" #"10"
+LIDAR_HZ="5" #"10"
 LIDAR_SDF=${MODEL_SDF_DIR}/model.sdf
 sed -i "s|<update\_rate>.*</|<update\_rate>${LIDAR_HZ}</|" "${LIDAR_SDF}"
 
@@ -136,7 +136,7 @@ if [[ $EXEC_MODE != "test_remote" ]]; then
 
     if [[ $EXEC_MODE != "dataset_gen" ]]; then
         PT="$CUR_PWD/../lidar"
-        MODEL_RUN_DIR="${PT}/single_z16"
+        MODEL_RUN_DIR="${PT}/statpillars_xyz_stats_04"
         run_job "$RUN_DIR/ros2_dnn_infer.log" python "${PT}/gnd_seg_dnn/ros2_infer.py" \
             --run-dir "${MODEL_RUN_DIR}" --backend onnx --world-frame "${SCENE_NAME}"
     fi

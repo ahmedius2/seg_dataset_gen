@@ -142,6 +142,7 @@ class PillarVFE(VFETemplate):
         Points beyond the P-th in a pillar are dropped.
         """
         P = self.max_points_per_voxel
+        points = points[torch.isfinite(points[:, 1:4]).all(dim=1)]
         # Drop points outside the grid
         points_coords = torch.floor(
             (points[:, [1, 2]] - self.point_cloud_range[[0, 1]]) / self.voxel_size[[0, 1]]

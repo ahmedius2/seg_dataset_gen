@@ -118,6 +118,7 @@ class DynamicPillarVFE(VFETemplate):
     def forward(self, points):
         _require_torch_scatter()
 
+        points = points[torch.isfinite(points[:, 1:4]).all(dim=1)]
         # Here, we filter the points out of range
         points_coords = torch.floor((points[:, [1,2]] - self.point_cloud_range[[0,1]]) / self.voxel_size[[0,1]]).int()
         mask = ((points_coords >= 0) & (points_coords < self.grid_size[[0,1]])).all(dim=1)

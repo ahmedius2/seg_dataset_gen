@@ -20,6 +20,7 @@ class PillarEncoderNP:
         self.channels = self.w2.shape[1]
 
     def __call__(self, points):
+        points = points[np.isfinite(points[:, :3]).all(axis=1)]
         ij = np.floor(
             (points[:, :2] - self.point_range[:2]) / self.voxel[:2]
         ).astype(np.int32)
@@ -79,13 +80,17 @@ class StatPillarsEncoderNP:
         self.num_threads = int(data["num_threads"]) if num_threads is None else num_threads
 
     def __call__(self, points):
+        stats, _ = self.encode_with_counts(points)
+        return stats
+
+    def encode_with_counts(self, points):
         points = np.asarray(points, dtype=np.float32)
         batched = np.zeros((len(points), 4), dtype=np.float32)
         batched[:, 1:] = points[:, :3]
-        stats, _ = pillar_statistics(
+        stats, counts = pillar_statistics(
             batched, self.point_range, self.voxel_size, (self.nx, self.ny),
             self.max_points, self.num_threads, 1)
-        return stats
+        return stats, counts
 
 
 class DynamicPillarOnnxModel:
@@ -113,6 +118,20 @@ class DynamicPillarOnnxModel:
     def predict_logits(self, points):
         t0 = time.perf_counter()
         bev = self.encoder(points)
+        return self._predict_bev(bev, t0)
+
+    def predict_with_coverage(self, points):
+        if not isinstance(self.encoder, StatPillarsEncoderNP):
+            raise ValueError("Pillar count coverage requires a StatPillars encoder")
+        t0 = time.perf_counter()
+        bev, counts = self.encoder.encode_with_counts(points)
+        observed = counts[0] > 0
+        if not observed.any():
+            return None, observed
+        logits = np.clip(self._predict_bev(bev, t0), -80.0, 80.0)
+        return (1.0 / (1.0 + np.exp(-logits))).astype(np.float32), observed
+
+    def _predict_bev(self, bev, t0):
         t1 = time.perf_counter()
         logits = self.session.run(
             [self.output_name], {self.input_name: bev}

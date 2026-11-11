@@ -85,6 +85,10 @@ class DNNInferenceNode(Node):
 
         self.grid_h = self.cfg.grid_h
         self.grid_w = self.cfg.grid_w
+        self._reuse_pillar_coverage = (
+            self.cfg.model_variant == "statpillars"
+            and self.cfg.col_axis == 0 and self.cfg.row_axis == 1
+        )
         self.get_logger().info(
             f"Model loaded on {self.device}; BEV grid = "
             f"{self.grid_w} x {self.grid_h} cells @ {self.cfg.cell_size} m"
@@ -183,14 +187,20 @@ class DNNInferenceNode(Node):
         )
 
     # -----------------------------------------------------------------------
-    # Inference — unchanged
+    # Inference
     # -----------------------------------------------------------------------
     def _run_inference(self, xyz_aligned):
         if xyz_aligned.shape[0] == 0:
-            return np.zeros((self.grid_h, self.grid_w), dtype=np.float32)
+            return np.zeros((self.grid_h, self.grid_w), dtype=np.float32), None
 
         if self.backend != "torch":
-            prob = self.model(xyz_aligned)
+            if self._reuse_pillar_coverage:
+                prob, observed = self.model.predict_with_coverage(xyz_aligned)
+                if prob is None:
+                    return None, observed
+            else:
+                prob = self.model(xyz_aligned)
+                observed = None
             self._enc_ms, self._net_ms = self.model.last_timings_ms
             dropped = getattr(self.model, "dropped_pillars", 0)
             if dropped:
@@ -198,7 +208,7 @@ class DNNInferenceNode(Node):
                     f"{dropped} pillars exceed max_pillars and were dropped; "
                     f"re-export with a larger --max-pillars",
                     throttle_duration_sec=5.0)
-            return prob
+            return prob, observed
 
         torch = self.torch
         point_device = "cpu" if self.cfg.model_variant == "statpillars" else self.device
@@ -214,13 +224,32 @@ class DNNInferenceNode(Node):
             dtype=self.amp_dtype,
             enabled=self.use_amp,
         ):
-            if timed:
+            if self._reuse_pillar_coverage:
+                if timed:
+                    self._sync()
+                    t0 = time.perf_counter()
+                features, counts = self.model.encoder.encode_with_counts(model_input)
+                observed = counts[0] > 0
+                if not observed.any():
+                    return None, observed
+                features = features.to(self.device)
+                if timed:
+                    self._sync()
+                    t1 = time.perf_counter()
+                logits = self.model.backbone(features).squeeze(1)
+                if timed:
+                    self._sync()
+                    self._enc_ms = (t1 - t0) * 1000.0
+                    self._net_ms = (time.perf_counter() - t1) * 1000.0
+            elif timed:
+                observed = None
                 logits = self._timed_forward(model_input)
             else:
+                observed = None
                 logits = self.model(model_input)
 
         prob = torch.sigmoid(logits.float())[0]
-        return prob.detach().cpu().numpy()
+        return prob.detach().cpu().numpy(), observed
 
     def _sync(self):
         if self.device.type == "cuda":
@@ -253,22 +282,16 @@ class DNNInferenceNode(Node):
     # -----------------------------------------------------------------------
     def _rasterize_coverage(self, xyz_aligned):
         cfg = self.cfg
+        finite = xyz_aligned[np.isfinite(xyz_aligned).all(axis=1)]
         observed = np.zeros((self.grid_h, self.grid_w), dtype=bool)
-        if xyz_aligned.shape[0] == 0:
-            return observed
-
-        u = xyz_aligned[:, cfg.col_axis]
-        v = xyz_aligned[:, cfg.row_axis]
-
-        j = np.floor((u - cfg.x_min) * (1.0 / cfg.cell_size)).astype(np.int64)
-        i = np.floor((v - cfg.y_min) * (1.0 / cfg.cell_size)).astype(np.int64)
-
-        inside = (i >= 0) & (i < self.grid_h) & (j >= 0) & (j < self.grid_w)
-        if inside.any():
-            observed[i[inside], j[inside]] = True
-
+        with np.errstate(over="ignore"):
+            cols = np.floor((finite[:, cfg.col_axis] - cfg.x_min) * (1.0 / cfg.cell_size))
+            rows = np.floor((finite[:, cfg.row_axis] - cfg.y_min) * (1.0 / cfg.cell_size))
+        inside = ((cols >= 0) & (cols < self.grid_w) &
+                  (rows >= 0) & (rows < self.grid_h))
+        observed[rows[inside].astype(np.int64), cols[inside].astype(np.int64)] = True
         coverage = dilate_bev_mask(observed, self.coverage_kernel)
-        return np.asarray(coverage, dtype=bool)
+        return np.asarray(coverage, dtype=bool), len(finite)
 
     # -----------------------------------------------------------------------
     # Main callback — inference + fusion only. No publishing.
@@ -283,21 +306,26 @@ class DNNInferenceNode(Node):
             return
         pts = raw.reshape(-1, 3)
 
-        finite = np.isfinite(pts).all(axis=1)
-        if not finite.all():
-            pts = pts[finite]
-        if pts.shape[0] == 0:
-            return
         unpack_ms = (time.perf_counter() - t0) * 1000.0
+
+        # Other encoders or alternate coverage axes still need a separate pass.
+        if not self._reuse_pillar_coverage:
+            t0 = time.perf_counter()
+            coverage, finite_count = self._rasterize_coverage(pts)
+            rasterize_ms = (time.perf_counter() - t0) * 1000.0
+            if finite_count == 0:
+                return
 
         # ---- 2. Inference ----
         t0 = time.perf_counter()
         try:
-            prob = self._run_inference(pts)
+            prob, observed = self._run_inference(pts)
         except Exception as e:  # noqa: BLE001
             self.get_logger().error(f"Inference failed: {e}")
             return
 
+        if prob is None:
+            return
         if prob.shape != (self.grid_h, self.grid_w):
             self.get_logger().error(
                 f"Unexpected BEV shape {prob.shape}, expected "
@@ -307,9 +335,10 @@ class DNNInferenceNode(Node):
         infer_ms = (time.perf_counter() - t0) * 1000.0
 
         # ---- 3. Coverage ----
-        t0 = time.perf_counter()
-        coverage = self._rasterize_coverage(pts)
-        rasterize_ms = (time.perf_counter() - t0) * 1000.0
+        if self._reuse_pillar_coverage:
+            t0 = time.perf_counter()
+            coverage = dilate_bev_mask(observed, self.coverage_kernel)
+            rasterize_ms = (time.perf_counter() - t0) * 1000.0
 
         # ---- 4. Fusion (now local) ----
         t0 = time.perf_counter()

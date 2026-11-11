@@ -294,7 +294,9 @@ timing logs.
 
 ## Run ROS 2 Inference Without PyTorch
 
-Install NumPy and ONNX Runtime in the inference environment, and source the ROS 2 and workspace setup files. From `lidar`, launch with the exported model:
+Install NumPy and ONNX Runtime in the inference environment, and source the ROS 2 and workspace setup files. StatPillars uses the C++ voxelizer extension to skip non-finite points and reuses pillar counts for coverage when the coverage axes are X and Y; other configurations use a separate coverage pass. Build the extension for StatPillars or static pillars on the target with `python setup.py build_ext --inplace` from `lidar`.
+
+From `lidar`, launch with the exported model:
 
 ```bash
 cd lidar

@@ -19,6 +19,7 @@ find_package(pcl_conversions REQUIRED)
 find_package(PCL REQUIRED COMPONENTS common filters)
 find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
+find_package(point_cloud_transport REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/AlignedCloudWithPose.msg"
@@ -33,6 +34,7 @@ target_link_libraries(pc_transform_node
   tf2::tf2
   ${PCL_LIBRARIES}
   tf2_ros::tf2_ros
+  point_cloud_transport::point_cloud_transport
 )
 
 rosidl_get_typesupport_target(cpp_typesupport_target ${PROJECT_NAME} "rosidl_typesupport_cpp")

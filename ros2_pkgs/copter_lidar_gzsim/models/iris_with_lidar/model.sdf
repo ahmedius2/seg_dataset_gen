@@ -15,6 +15,7 @@
   <publish_visual_pose>false</publish_visual_pose>
   <publish_nested_model_pose>true</publish_nested_model_pose>
   <use_pose_vector_msg>true</use_pose_vector_msg>
+  <update_frequency>50</update_frequency>
 </plugin>
 
 <link name="lidar_link">
@@ -30,7 +31,7 @@
 
   <sensor name="robosense_emx192" type="gpu_lidar">
     <pose>0 0 0 0 0 0</pose>
-    <update_rate>2</update_rate>
+    <update_rate>5</update_rate>
     <topic>sim_lidar/pointcloud</topic>
     <ray>
       <scan>

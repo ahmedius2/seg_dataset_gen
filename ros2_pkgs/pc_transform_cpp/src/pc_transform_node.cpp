@@ -46,6 +46,7 @@
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <sensor_msgs/msg/point_field.hpp>
 #include <sensor_msgs/point_cloud2_iterator.hpp>
+#include <point_cloud_transport/point_cloud_transport.hpp>
 
 #include <tf2/LinearMath/Matrix3x3.hpp>
 #include <tf2/LinearMath/Quaternion.hpp>
@@ -275,7 +276,7 @@ public:
     AlignCloudNode() : rclcpp::Node("align_cloud_node") {
         // Parameters
         declare_parameter<std::string>("input_cloud_topic",
-            "/sim_lidar/pointcloud/points");
+            "/sim_lidar/pointcloud/compressed");
         declare_parameter<double>("voxel_leaf_size", 0.1);
         declare_parameter<std::string>("output_cloud_topic",
             "/sim_lidar/pointcloud/aligned");
@@ -367,6 +368,7 @@ public:
 
         // Publisher
         auto qos = rclcpp::SensorDataQoS();
+
         cloud_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>(
             get_parameter("output_cloud_topic").as_string(), qos);
 
@@ -375,10 +377,6 @@ public:
         aligned_pub_ = create_publisher<pc_transform_cpp::msg::AlignedCloudWithPose>(
             get_parameter("output_aligned_topic").as_string(), qos);
 
-        // Subscriber
-        cloud_sub_ = create_subscription<sensor_msgs::msg::PointCloud2>(
-            get_parameter("input_cloud_topic").as_string(), qos,
-            std::bind(&AlignCloudNode::cloud_callback, this, std::placeholders::_1));
 
         // Writer thread
         writer_stop_.store(false);
@@ -389,6 +387,25 @@ public:
             "ground_z=%.3f, origin_mode='%s', ground_band=%.3f, mad_k=%.2f",
             lidar_frame_.c_str(), world_frame_.c_str(), drone_frame_.c_str(),
             ground_z_, origin_mode_.c_str(), ground_band_, mad_k_);
+    }
+
+    // Add this initialization function
+    void init()
+    {
+        // Subscriber
+        pct_ = std::make_shared<point_cloud_transport::PointCloudTransport>(
+                this->shared_from_this());
+        auto transport_hint = std::make_shared<point_cloud_transport::TransportHints>("zstd");
+
+        comp_cloud_sub_ = pct_->subscribe(
+            get_parameter("input_cloud_topic").as_string(),
+            rmw_qos_profile_sensor_data,
+            &AlignCloudNode::cloud_callback, this,
+            {}, transport_hint.get());
+
+        // cloud_sub_ = create_subscription<sensor_msgs::msg::PointCloud2>(
+            // get_parameter("input_cloud_topic").as_string(), qos,
+            // std::bind(&AlignCloudNode::cloud_callback, this, std::placeholders::_1));
     }
 
     ~AlignCloudNode() override {
@@ -402,7 +419,7 @@ public:
 
 private:
     // ---- subscriber callback: just enqueue ----
-    void cloud_callback(sensor_msgs::msg::PointCloud2::ConstSharedPtr msg) {
+    void cloud_callback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr& msg) const {
         {
             std::unique_lock<std::mutex> lk(queue_mutex_);
             if (drop_when_full_ && writer_queue_size_ > 0 &&
@@ -411,7 +428,7 @@ private:
                 ++dropped_count_;
                 return;
             }
-            queue_.push(std::move(msg));
+            queue_.push(msg);
         }
         queue_cv_.notify_one();
     }
@@ -618,7 +635,7 @@ private:
         aligned_pub_->publish(std::move(out));
         // ########## DEBUG #############
         //const auto end = std::chrono::steady_clock::now();
-        //const auto duration = 
+        //const auto duration =
         //std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
         //RCLCPP_INFO(this->get_logger(),
         //        "Cloud processing time: %ld us (%.3f ms)",
@@ -907,17 +924,19 @@ private:
     double voxel_leaf_size_ = 0.1;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_pub_;
     rclcpp::Publisher<pc_transform_cpp::msg::AlignedCloudWithPose>::SharedPtr aligned_pub_;
-    rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_sub_;
+    // rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_sub_;
+    std::shared_ptr<point_cloud_transport::PointCloudTransport> pct_;
+    point_cloud_transport::Subscriber comp_cloud_sub_;
 
-    std::queue<sensor_msgs::msg::PointCloud2::ConstSharedPtr> queue_;
-    std::mutex queue_mutex_;
-    std::condition_variable queue_cv_;
+    mutable std::queue<sensor_msgs::msg::PointCloud2::ConstSharedPtr> queue_;
+    mutable std::mutex queue_mutex_;
+    mutable std::condition_variable queue_cv_;
     std::atomic<bool> writer_stop_{false};
     std::thread writer_thread_;
 
     std::atomic<size_t> saved_count_{0};
     std::atomic<size_t> pose_count_{0};
-    std::atomic<size_t> dropped_count_{0};
+    mutable std::atomic<size_t> dropped_count_{0};
 };
 
 // ---------------------------------------------------------------------------
@@ -926,6 +945,7 @@ int main(int argc, char ** argv) {
     rclcpp::init(argc, argv);
     try {
         auto node = std::make_shared<AlignCloudNode>();
+        node->init();
         rclcpp::spin(node);
     } catch (const std::exception & e) {
         RCLCPP_FATAL(rclcpp::get_logger("pc_transform_node"),

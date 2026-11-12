@@ -35,11 +35,20 @@
     <topic>sim_lidar/pointcloud</topic>
     <ray>
       <scan>
+
         <horizontal>
+          <!-- Original, too much -->
+          <!--
           <samples>1750</samples>
           <resolution>1</resolution>
           <min_angle>-1.22173</min_angle>
           <max_angle>1.22173</max_angle>
+          -->
+          <!-- Less -->
+          <samples>768</samples>
+          <resolution>1</resolution>
+          <min_angle>-0.53616</min_angle>
+          <max_angle>0.53616</max_angle>
         </horizontal>
         <vertical>
           <samples>192</samples>

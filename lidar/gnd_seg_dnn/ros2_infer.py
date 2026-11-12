@@ -152,7 +152,7 @@ class DNNInferenceNode(Node):
             reliability=ReliabilityPolicy.BEST_EFFORT,
             durability=DurabilityPolicy.VOLATILE,
             history=HistoryPolicy.KEEP_LAST,
-            depth=100,
+            depth=1,
         )
 
         self.subscription = self.create_subscription(

@@ -12,26 +12,27 @@ from .bev_ops import coverage_kernel_size, dilate_bev_mask
 from .ply_io import load_cloud, read_ply
 
 
+def _kitti_ground(classes):
+    from .kitti import ground_mask
+    return ground_mask(classes)
+
+
 # --------------------------------------------------------------------------- #
 #  Ground truth
 # --------------------------------------------------------------------------- #
 
-def rasterize_occupancy(xyz, intensity, cfg: Config):
-    """
-    Build the BEV ground-truth mask.
+def cell_indices(xyz, cfg: Config):
+    """Map points to BEV cells.
 
-    Returns
-    -------
-    occ      : [H, W] float32, 1.0 where a point with intensity in
-               [lo, hi] landed, else 0.0
-    observed : [H, W] bool, True where any point landed
+    Returns ``(i, j, keep)``: row/column of every kept point, plus the mask of
+    points that survived the z-range and grid-extent tests. Row/column flips
+    are applied. This is the single source of truth for point -> cell mapping,
+    shared by label rasterization and point-wise evaluation.
     """
-    h, w = cfg.grid_h, cfg.grid_w
-    occ = np.zeros((h, w), dtype=np.float32)
-    observed = np.zeros((h, w), dtype=bool)
-
-    if xyz.shape[0] == 0:
-        return occ, observed
+    n = xyz.shape[0]
+    if n == 0:
+        empty = np.zeros(0, dtype=np.int64)
+        return empty, empty, np.zeros(0, dtype=bool)
 
     u = xyz[:, cfg.col_axis]      # -> column index j
     v = xyz[:, cfg.row_axis]      # -> row index i
@@ -39,32 +40,70 @@ def rasterize_occupancy(xyz, intensity, cfg: Config):
 
     keep = (z >= cfg.z_min) & (z <= cfg.z_max)
     if not keep.any():
-        return occ, observed
-    u, v, intensity = u[keep], v[keep], intensity[keep]
+        empty = np.zeros(0, dtype=np.int64)
+        return empty, empty, keep
 
     j = np.floor((u - cfg.x_min) / cfg.cell_size).astype(np.int64)
     i = np.floor((v - cfg.y_min) / cfg.cell_size).astype(np.int64)
+    keep &= (j >= 0) & (j < cfg.grid_w) & (i >= 0) & (i < cfg.grid_h)
 
-    inside = (j >= 0) & (j < w) & (i >= 0) & (i < h)
-    if not inside.any():
-        return occ, observed
-    i, j, intensity = i[inside], j[inside], intensity[inside]
-
+    i, j = i[keep], j[keep]
     if cfg.flip_cols:
-        j = (w - 1) - j
+        j = (cfg.grid_w - 1) - j
     if cfg.flip_rows:
-        i = (h - 1) - i
+        i = (cfg.grid_h - 1) - i
+    return i, j, keep
 
-    observed[i, j] = True
 
-    is_occ = (intensity >= cfg.intensity_lo) & (intensity <= cfg.intensity_hi)
-    if is_occ.any():
-        occ[i[is_occ], j[is_occ]] = 1.0
+def rasterize_masks(xyz, cfg: Config, positive, observed_points=None):
+    """Build the BEV occupancy target from per-point boolean masks.
+
+    Parameters
+    ----------
+    positive         : [N] bool, points that mark a cell as occupied
+    observed_points  : [N] bool or None, points that mark a cell as observed
+                       (defaults to all points inside the grid)
+
+    Returns
+    -------
+    occ      : [H, W] float32, 1.0 where a positive point landed
+    observed : [H, W] bool, True where an observed point landed
+    """
+    h, w = cfg.grid_h, cfg.grid_w
+    occ = np.zeros((h, w), dtype=np.float32)
+    observed = np.zeros((h, w), dtype=bool)
+
+    i, j, keep = cell_indices(xyz, cfg)
+    if i.shape[0] == 0:
+        return occ, observed
+
+    pos = np.asarray(positive)[keep]
+    obs = (np.ones_like(pos) if observed_points is None
+           else np.asarray(observed_points)[keep])
+
+    observed[i[obs], j[obs]] = True
+    if pos.any():
+        occ[i[pos], j[pos]] = 1.0
 
     # Fill small holes using a fixed metric reach across BEV resolutions.
-    occ = dilate_bev_mask(occ, coverage_kernel_size(cfg.cell_size))
+    occ = dilate_bev_mask(occ, coverage_kernel_size(cfg.cell_size,
+                                                    cfg.label_fill_reach_m))
 
     return occ, observed
+
+
+def rasterize_occupancy(xyz, intensity, cfg: Config):
+    """
+    Build the BEV ground-truth mask from the simulator's intensity tags.
+
+    Returns
+    -------
+    occ      : [H, W] float32, 1.0 where a point with intensity in
+               [lo, hi] landed, else 0.0
+    observed : [H, W] bool, True where any point landed
+    """
+    positive = (intensity >= cfg.intensity_lo) & (intensity <= cfg.intensity_hi)
+    return rasterize_masks(xyz, cfg, positive)
 
 
 # --------------------------------------------------------------------------- #
@@ -72,6 +111,9 @@ def rasterize_occupancy(xyz, intensity, cfg: Config):
 # --------------------------------------------------------------------------- #
 
 def discover_files(cfg: Config):
+    if cfg.dataset == "kitti":
+        from .kitti import discover_files as kitti_discover
+        return kitti_discover(cfg)
     root = Path(cfg.data_root)
     if not root.exists():
         raise FileNotFoundError(f"data_root does not exist: {root}")
@@ -82,6 +124,9 @@ def discover_files(cfg: Config):
 
 
 def scene_key(path, cfg: Config):
+    if cfg.dataset == "kitti":
+        from .kitti import sequence_of
+        return sequence_of(path)
     if not cfg.split_by_scene:
         return str(path)
     rel = Path(path).relative_to(cfg.data_root)
@@ -90,6 +135,10 @@ def scene_key(path, cfg: Config):
 
 def split_files(files, cfg: Config):
     """Split into train/val/test, optionally grouped by scene directory."""
+    if cfg.dataset == "kitti":
+        from .kitti import split_files as kitti_split
+        return kitti_split(files, cfg)
+
     rng = np.random.default_rng(cfg.split_seed)
 
     if cfg.split_by_scene:
@@ -181,6 +230,8 @@ class BEVOccupancyDataset(Dataset):
         return points, occ, weight, meta
 
     def _load_sample(self, path):
+        if self.cfg.dataset == "kitti":
+            return self._load_sample_kitti(path)
         xyz, intensity = load_cloud(path)
 
         finite = np.isfinite(xyz).all(axis=1) & np.isfinite(intensity)
@@ -191,20 +242,55 @@ class BEVOccupancyDataset(Dataset):
         occ, observed = rasterize_occupancy(xyz, intensity, self.cfg)
         return xyz, intensity, occ, observed
 
+    def _load_sample_kitti(self, path):
+        """SemanticKITTI frame: labels come from the .label file, not intensity."""
+        from .kitti import load_frame
+
+        xyz, classes = load_frame(path)
+        finite = np.isfinite(xyz).all(axis=1)
+        if not finite.all():
+            xyz, classes = xyz[finite], classes[finite]
+
+        # A cell is positive when a non-ground, non-ignored point lands in it.
+        scored = ~np.isin(classes, tuple(self.cfg.kitti_ignore_classes))
+        positive = scored & ~_kitti_ground(classes)
+        observed_points = scored if self.cfg.kitti_observe_scored_only else None
+        occ, observed = rasterize_masks(xyz, self.cfg, positive, observed_points)
+        # Intensity is unused by the model; keep a zero vector of equal length.
+        return xyz, np.zeros(xyz.shape[0], dtype=np.float32), occ, observed
+
     def _augment(self, xyz, index):
-        """Z-only geometric augs on a copy of xyz. Labels are not modified."""
+        """Geometric augs on a copy of xyz. Labels are not modified."""
         if not self.train:
             return xyz
 
         cfg = self.cfg
         do_shift = cfg.aug_z_shift
         do_invert = cfg.aug_z_invert and cfg.aug_z_invert_prob > 0
-        if not do_shift and not do_invert:
+        do_rot = cfg.aug_rot_deg > 0 and cfg.aug_rot_prob > 0
+        if not do_shift and not do_invert and not do_rot:
             return xyz
 
         xyz = xyz.copy()
         rng = np.random.default_rng(
             (torch.initial_seed() + index + 1) % (2 ** 31))
+
+        if do_rot and rng.random() < cfg.aug_rot_prob:
+            # Rotate about x and y so the model sees slopes it never gets
+            # from the mostly flat KITTI sequences.
+            for axis in (0, 1):
+                if rng.random() >= 0.5:
+                    continue
+                theta = np.deg2rad(rng.uniform(-cfg.aug_rot_deg, cfg.aug_rot_deg))
+                c, s = np.float32(np.cos(theta)), np.float32(np.sin(theta))
+                if axis == 0:      # about x: mix y, z
+                    y, z = xyz[:, 1].copy(), xyz[:, 2].copy()
+                    xyz[:, 1] = c * y - s * z
+                    xyz[:, 2] = s * y + c * z
+                else:              # about y: mix z, x
+                    z, x = xyz[:, 2].copy(), xyz[:, 0].copy()
+                    xyz[:, 2] = c * z - s * x
+                    xyz[:, 0] = s * z + c * x
 
         if do_shift:
             shift = rng.uniform(cfg.aug_z_shift_min, cfg.aug_z_shift_max)

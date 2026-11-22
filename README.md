@@ -325,6 +325,138 @@ threshold. `--voxelizer-threads` overrides the static or StatPillars CPU voxeliz
 after `--ros-args`. The Torch backend requires
 PyTorch. The ONNX backend loads no PyTorch modules.
 
+## SemanticKITTI Ground Segmentation
+
+> **Scope.** This section trains a **binary ground / non-ground** segmenter and
+> reports it with the metric defined by the GndNet and KAIST
+> ground-segmentation benchmarks. That is **not one of the six official
+> SemanticKITTI benchmarks** ([tasks](https://semantic-kitti.org/tasks.html):
+> semantic segmentation, panoptic, 4D panoptic, moving-object segmentation,
+> semantic scene completion, open-world instance segmentation), and the numbers
+> here are **not comparable** with the SemanticKITTI leaderboards.
+>
+> In particular the `mIoU` reported below averages only **C = 2** classes
+> (ground, non-ground) and is close to 87. The official semantic-segmentation
+> mIoU averages **19-20 classes** over per-point labels and sits around 60-70
+> on published leaderboard entries. When quoting work from this repository,
+> cite the **ground-class IoU** (about 85.7 at 0.4 m) and name it as GndNet/
+> KAIST-protocol binary ground segmentation, never as a SemanticKITTI mIoU.
+>
+> Producing an official SemanticKITTI result would need a 19-class point-wise
+> head (this model emits one occupancy value per BEV cell), a different loss,
+> and evaluation on the secrets test labels via CodaBench.
+
+The same training stack runs on SemanticKITTI odometry scans, so results can be
+compared with the ground-segmentation literature. Set `dataset: kitti` and
+point `data_root` at the `sequences` directory (the one holding `00`, `01`, ...
+each with `velodyne/` and `labels/`):
+
+```yaml
+data_root: /mnt/data/SemanticKITTI/raw/dataset/sequences
+dataset: kitti
+train_sequences: [0, 1, 2, 3, 4, 5, 6]
+val_sequences: [7]
+test_sequences: [8]
+frame_stride: 1
+label_fill_reach_m: 0.0        # no hole-fill dilation on real scans
+kitti_ignore_classes: [0, 1, 70]   # unlabeled, outlier, vegetation
+```
+
+`train_sequences` accepts `7`, `"07"`, `"00-06"` or a list of those, and each
+sequence stays wholly inside one split. `configs/kitti_statpillars_dseg_04.yaml` is
+a ready 0.4 m StatPillars configuration: a 51.2 m x 51.2 m window (91-97% of a
+scan), `z` in `[-8, 3]` m relative to the sensor, no `z` inversion.
+
+The task stays binary BEV occupancy: a cell is positive when a scored
+non-ground point lands in it, where ground is `road`, `parking`, `sidewalk`,
+`other-ground`, `lane-marking` and `terrain` (`kitti.py`). Intensity is unused,
+as in the simulator pipeline.
+
+```bash
+cd lidar
+python -m gnd_seg_dnn.train --config configs/kitti_statpillars_dseg_04.yaml
+python -m gnd_seg_dnn.evaluate_kitti --run-dir kitti_statpillars_dseg_04 --split test
+```
+
+`evaluate_kitti` converts the BEV prediction back to a label per point and
+reports the protocol of the KAIST ground-segmentation benchmark (Patchwork,
+Patchwork++, TRAVEL): point-wise Precision/Recall/F1 averaged per frame, ground
+classes as above, `unlabeled`/`outlier` never scored and vegetation excluded
+(`--with-vegetation` for the alternative variant). Options include
+`--sequences 08 09`, `--max-frames`, `--threshold`, `--sweep`,
+`--per-frame-out` and `--scope {window,scan}`. Use `scan` to score all labeled
+points, where out-of-window points count as predicted non-ground.
+
+Every evaluation also prints reference baselines on the same frames, because
+these metrics saturate and a bare IoU says little on its own:
+
+| Baseline | Meaning |
+| --- | --- |
+| all ground / all obstacle | trivial predictors |
+| **height rule `REACH`** | classical segmentation: a point is ground when within `REACH` of its own cell's lowest point. Defaults 0.1 / 0.2 / 0.3 m; `--height-baselines` overrides, and passing no values disables it |
+| cell oracle | perfect per-cell decision given this BEV grid, i.e. the quantisation ceiling |
+
+The height rule matters because the label definition is close to *"is this
+point within ~0.2 m of the local ground surface"*. On SemanticKITTI it reaches
+~82-84 IoU with no training at all, so it is the baseline any learned model
+must actually beat. A model that loses to it is not solving more than a height
+threshold; a model that matches it at much higher precision is doing something
+useful. Note that coarse cells starve the point encoder (`max_points_per_voxel`
+caps how many points per pillar reach the network: ~32% of points survive at
+1.0 m, ~94% at 0.4 m, ~100% at 0.2 m), which is why the 1.0 m config
+underperforms the height rule while 0.4 m does not.
+
+### Champion recipe and hyper-parameter search
+
+`configs/kitti_statpillars_gndnet_04.yaml` is the tuned 0.4 m recipe. A
+sequential search over loss and optimisation settings
+(`python -m gnd_seg_dnn.search_kitti`) improved the ground-class IoU on the
+full GndNet validation split:
+
+| Recipe | Precision | Recall | gIoU |
+| --- | --- | --- | --- |
+| GndNet (paper) | 84.1 | 99.3 | 83.6 |
+| height rule 0.2 m (no training) | 93.3 | 88.4 | 84.8 |
+| `focal_alpha: 0.75` (previous) | 98.4 | 86.1 | 84.9 |
+| **`focal_alpha: 0.5` (champion)** | 98.1 | 87.2 | **85.7** |
+| `loss_type: bce` (tie) | 97.8 | 87.4 | 85.7 |
+| cell oracle (quantisation ceiling) | 100.0 | 89.3 | 90.6 |
+
+The gain comes from recall: rebalancing the focal loss recovers ground points
+the old setting under-segmented, at no cost in precision. `focal_gamma: 1.0`,
+`lr: 0.001` and `warmup_epochs: 2` all made it worse. `label_fill_reach_m`
+below 0.9 m is a no-op at 0.4 m cells because the dilation kernel stays at 1.
+
+The search writes one directory per trial plus `results.json` and `summary.txt`,
+runs a single training session at a time, and stops at its `--time-budget`.
+Champion artifacts live in `lidar/kitti_statpillars_gndnet_04/`.
+
+Two families of KITTI configs exist, differing only in their sequence split:
+
+| Config | Split | Purpose |
+| --- | --- | --- |
+| `kitti_statpillars_dseg_04.yaml` | train 00-06, val 07, test 08 | DSegKITTI ground-segmentation protocol |
+| `kitti_statpillars_gndnet_{10,04,02}.yaml` | train 00,02,03,04,06,08,10, val 01,05,07,09 | GndNet's 7/4 split, so results can be compared with Paigwar et al. (IROS 2020) |
+
+The `gndnet` suffix names the **evaluation protocol** (split, ground classes,
+metric), never the network: every config in this repository trains this
+repository's StatPillars model. Evaluate them with `--protocol gndnet`, which
+reproduces GndNet's point-wise Precision/Recall/IoU, drops unlabeled/outlier
+points, treats vegetation as non-ground and reports ground-class IoU.
+
+To score a checkpoint trained on the simulator data without retraining, pass
+its run directory; the loader keeps the checkpoint's own BEV geometry, and
+`--sequences` selects the frames:
+
+```bash
+python -m gnd_seg_dnn.evaluate_kitti --run-dir statpillars_xyz_stats_04 \
+  --data /mnt/data/SemanticKITTI/raw/dataset/sequences --sequences 08
+```
+
+Note that this evaluates a model trained on a different sensor geometry and
+label distribution, so treat it as a transfer baseline rather than a result
+comparable with the published tables.
+
 ## Alternative Models
 
 - **StatPillars:** set `model_variant: statpillars` in a YAML config to train on

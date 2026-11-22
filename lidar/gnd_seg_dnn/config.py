@@ -33,6 +33,9 @@ def load_yaml_mapping(path):
 @dataclass
 class Config:
     # ---- Data ----
+    # "ply": this repository's simulator output (*.ply with x/y/z/intensity).
+    # "kitti": SemanticKITTI odometry layout (*.bin + *.label), see kitti.py.
+    dataset: str = "ply"
     data_root: str = "/home/ubuntu/shared/dnn_dataset"
     file_glob: str = "**/*.ply"
     val_fraction: float = 0.20
@@ -40,12 +43,28 @@ class Config:
     split_seed: int = 1234
     # Split by scene directory so frames from one scene never leak across splits.
     split_by_scene: bool = True
+    # dataset == "kitti": explicit sequence splits (never split inside a
+    # sequence). Accepts 7, "07", "00-06" or a list of those.
+    train_sequences: list = field(default_factory=list)
+    val_sequences: list = field(default_factory=list)
+    test_sequences: list = field(default_factory=list)
+    # Keep every N-th frame of each sequence (1 = all frames).
+    frame_stride: int = 1
 
     # ---- Ground truth ----
     intensity_lo: float = 190.0
     intensity_hi: float = 210.0
     # Cells no point touches are excluded from the loss.
     ignore_unobserved: bool = True
+    # Hole fill used when rasterizing the training target, in meters
+    # (<= 0 disables it). The simulator's 1.6 m keeps thin obstacle walls
+    # solid; on real data it merges neighbouring structures, so KITTI uses 0.
+    label_fill_reach_m: float = 1.6
+    # dataset == "kitti": label ids that are neither ground nor non-ground in
+    # the training target (unlabeled, outlier, vegetation).
+    kitti_ignore_classes: list = field(default_factory=lambda: [0, 1, 70])
+    # Only cells hit by a scored point count as observed (excluded from loss).
+    kitti_observe_scored_only: bool = True
 
     # ---- BEV grid geometry (meters) ----
     x_min: float = -6.4
@@ -66,7 +85,8 @@ class Config:
     num_point_features = 3
 
     # ---- Point sampling ----
-    #max_points: int = 60000
+    # Randomly keep at most this many points per frame (None = keep all).
+    max_points: int | None = None
     #min_points: int = 16
     # Keep each decoded cloud and rasterized label in RAM after first access.
     # Set False to reread and preprocess PLY files on every access.
@@ -80,6 +100,10 @@ class Config:
     # Randomly negate every point's z coordinate (z -> -z).
     aug_z_invert: bool = True
     aug_z_invert_prob: float = 0.5
+    # Uniform random rotation about x and/or y, in degrees (+/-). 0 disables.
+    # GndNet uses +/-10 deg on both axes to add uphill/downhill slope variety.
+    aug_rot_deg: float = 0.0
+    aug_rot_prob: float = 0.5
 
     # ---- Optimization ----
     epochs: int = 100
@@ -158,6 +182,29 @@ class Config:
     def __post_init__(self):
         if type(self.statpillars_projection) is not bool:
             raise ValueError("statpillars_projection must be a boolean")
+        if self.dataset not in ("ply", "kitti"):
+            raise ValueError("dataset must be 'ply' or 'kitti'")
+        if type(self.frame_stride) is not int or self.frame_stride < 1:
+            raise ValueError("frame_stride must be a positive integer")
+        if self.max_points is not None:
+            if type(self.max_points) is not int or self.max_points < 1:
+                raise ValueError("max_points must be a positive integer or null")
+        if self.label_fill_reach_m < 0:
+            raise ValueError("label_fill_reach_m must be non-negative")
+        if self.aug_rot_deg < 0:
+            raise ValueError("aug_rot_deg must be non-negative")
+        if not 0.0 <= self.aug_rot_prob <= 1.0:
+            raise ValueError("aug_rot_prob must be in [0, 1]")
+        if self.dataset == "kitti":
+            from .kitti import normalize_sequences
+            self.train_sequences = normalize_sequences(self.train_sequences)
+            self.val_sequences = normalize_sequences(self.val_sequences)
+            self.test_sequences = normalize_sequences(self.test_sequences)
+            if not (self.train_sequences or self.val_sequences
+                    or self.test_sequences):
+                raise ValueError(
+                    "dataset 'kitti' requires train_sequences/val_sequences/"
+                    "test_sequences (e.g. [0, 1, 2, 3, 4, 5, 6] and [7, 8])")
         if self.model_variant == "heightmap":
             warnings.warn(
                 "model_variant 'heightmap' is deprecated; use 'statpillars'. "

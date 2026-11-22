@@ -95,10 +95,14 @@ class DNNInferenceNode(Node):
         )
 
         # Coverage reach is fixed in meters, so the kernel scales with cell size.
-        self.coverage_kernel = coverage_kernel_size(self.cfg.cell_size)
+        # Honour the configured label reach: the 1.6 m default suits the narrow
+        # simulator strip, while KITTI exports set 0 and must not dilate.
+        self.coverage_kernel = coverage_kernel_size(
+            self.cfg.cell_size, self.cfg.label_fill_reach_m)
         self.get_logger().info(
             f"Coverage dilation kernel: {self.coverage_kernel} cells "
-            f"(~{self.coverage_kernel * self.cfg.cell_size:.1f} m)"
+            f"(~{self.coverage_kernel * self.cfg.cell_size:.1f} m, "
+            f"label_fill_reach_m={self.cfg.label_fill_reach_m})"
         )
 
         # ---- global occupancy grid (resolution locked to pillar size) ----

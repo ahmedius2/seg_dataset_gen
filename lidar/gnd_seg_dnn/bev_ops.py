@@ -9,8 +9,10 @@ COVERAGE_REACH_M = 1.6
 def coverage_kernel_size(cell_size, target_m=COVERAGE_REACH_M):
     """Odd kernel size (cells) whose metric width is closest to target_m.
 
-    Ties go to the smaller kernel.
+    Ties go to the smaller kernel. ``target_m`` <= 0 disables the kernel.
     """
+    if target_m is None or target_m <= 0:
+        return 1
     lower = max(1, 2 * int(np.floor((target_m / cell_size - 1) / 2)) + 1)
     upper = lower + 2
     return min((lower, upper), key=lambda k: (abs(k * cell_size - target_m), k))

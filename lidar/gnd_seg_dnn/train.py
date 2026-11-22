@@ -92,6 +92,17 @@ def set_seed(seed):
     torch.cuda.manual_seed_all(seed)
 
 
+def _worker_init(_worker_id):
+    """Keep dataloader workers single-threaded.
+
+    Each forked worker would otherwise inherit the full torch/OpenMP thread
+    pool, multiplying thread count and memory for no gain: the heavy work is
+    the C++ voxelizer, which uses its own `voxelizer_threads` pool.
+    """
+    import torch as _torch
+    _torch.set_num_threads(1)
+
+
 def build_loaders(cfg: Config):
     files = discover_files(cfg)
     train_f, val_f, test_f = split_files(files, cfg)
@@ -105,13 +116,17 @@ def build_loaders(cfg: Config):
 
     pin = torch.cuda.is_available()
     common = dict(collate_fn=collate_fn, num_workers=cfg.num_workers,
-                  pin_memory=pin)
+                  pin_memory=pin,
+                  worker_init_fn=_worker_init if cfg.num_workers else None)
+    # Only the training loader keeps its workers alive between epochs. Keeping
+    # the validation loader persistent as well doubles the resident worker
+    # count (~1 GB each) for an iterator that is rebuilt every epoch.
     train_loader = DataLoader(
         train_ds, batch_size=cfg.batch_size, shuffle=True,
         drop_last=len(train_ds) > cfg.batch_size,
         persistent_workers=cfg.num_workers > 0, **common)
     val_loader = DataLoader(val_ds, batch_size=cfg.batch_size, shuffle=False,
-                            persistent_workers=cfg.num_workers > 0, **common)
+                            **common)
     test_loader = DataLoader(test_ds, batch_size=cfg.batch_size, shuffle=False,
                              **common)
     return train_loader, val_loader, test_loader
@@ -262,7 +277,11 @@ def save_validation_visualizations(model, loader, device, cfg, epoch, out_dir):
 
         for index in range(target.shape[0]):
             observed = weight[index].numpy() > 0.5
-            coverage = dilate_bev_mask(observed, coverage_kernel_size(cfg.cell_size))
+            # Use the configured reach so this panel matches the labels and
+            # metrics; the legacy hardcoded 1.6 m overstated coverage.
+            coverage = dilate_bev_mask(
+                observed,
+                coverage_kernel_size(cfg.cell_size, cfg.label_fill_reach_m))
             target_image = target[index].numpy() > 0.5
             prob_image = probability[index].numpy()
             pred_image = prediction[index].numpy()
@@ -305,8 +324,8 @@ def report_point_stats(loader, cfg: Config, out_dir):
     pts_frame, pil_frame, pil_pts = [], [], []
     for pts, *_ in loader:
         b = pts[:, 0].long()
-        ix = torch.floor((pts[:, 1] - cfg.x_min) / cfg.cell_size).long()
-        iy = torch.floor((pts[:, 2] - cfg.y_min) / cfg.cell_size).long()
+        ix = torch.floor((pts[:, 1 + cfg.col_axis] - cfg.x_min) / cfg.cell_size).long()
+        iy = torch.floor((pts[:, 1 + cfg.row_axis] - cfg.y_min) / cfg.cell_size).long()
         ok = (ix >= 0) & (ix < nx) & (iy >= 0) & (iy < ny)
         b, key = b[ok], b[ok] * nx * ny + ix[ok] * ny + iy[ok]
         uniq, counts = torch.unique(key, return_counts=True)
@@ -394,15 +413,26 @@ def main():
     cfg = Config.from_yaml(args.config)
 
     set_seed(cfg.seed)
-    out_dir = Path(cfg.out_dir)
-    # add a number to out_dir, if it already exists, increment the number until we find a free one
-    if out_dir.exists():
-        i = 1
-        while (out_dir.parent / f"{out_dir.name}_{i:03d}").exists():
-            i += 1
-        out_dir = out_dir.parent / f"{out_dir.name}_{i:03d}"
-    out_dir.mkdir(parents=True, exist_ok=False)
-    shutil.copyfile(args.config, out_dir / "config.yaml")
+    # Resuming continues in the checkpoint's own run directory: a fresh numbered
+    # directory would silently orphan the history and best checkpoint.
+    if args.resume:
+        out_dir = Path(args.resume).resolve().parent
+        if not (out_dir / "config.yaml").is_file():
+            raise SystemExit(
+                f"--resume expects a checkpoint inside a run directory with "
+                f"config.yaml; {out_dir} has none")
+        print(f"[resume] continuing in {out_dir}")
+    else:
+        out_dir = Path(cfg.out_dir)
+        # add a number to out_dir, if it already exists, increment the number until we find a free one
+        if out_dir.exists():
+            i = 1
+            while (out_dir.parent / f"{out_dir.name}_{i:03d}").exists():
+                i += 1
+            out_dir = out_dir.parent / f"{out_dir.name}_{i:03d}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if not args.resume:
+        shutil.copyfile(args.config, out_dir / "config.yaml")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[device] {device}")
@@ -440,7 +470,15 @@ def main():
         best_iou = ckpt.get("best_iou", -1.0)
         print(f"[resume] from {args.resume} at epoch {start_epoch}")
 
+    # Keep epochs from before an interruption so history.json stays complete.
     history = []
+    if args.resume:
+        try:
+            history = json.loads((out_dir / "history.json").read_text())
+            history = [e for e in history if e["epoch"] < start_epoch]
+        except (OSError, ValueError, KeyError):
+            history = []
+
     ref_iou = best_iou  # last IoU that beat the previous reference by min_delta
     stale_epochs = 0
     for epoch in range(start_epoch, cfg.epochs):
